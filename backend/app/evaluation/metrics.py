@@ -63,7 +63,12 @@ class EvaluationRunner:
                 filter_approved_only=True,
                 machine_model="DEMO-CNC-01",
             )
-            resp = qa_service.answer_question(db, req, actor="benchmark_evaluator")
+            resp = qa_service.answer_question(
+                db,
+                req,
+                actor="benchmark_evaluator",
+                record_operational_events=False,
+            )
 
             latencies.append(resp.latency_ms)
 

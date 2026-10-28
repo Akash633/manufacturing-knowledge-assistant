@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.core.logging import logger
 from app.models.document import Document
 from app.models.chunk import DocumentChunk
+from app.governance.revision_rules import revision_governance
 from app.schemas.retrieval import RetrievalQuery, RetrievedPassage, RetrievalResponse, RetrievalModeEnum
 from app.retrieval.bm25 import bm25_engine
 from app.retrieval.vector import embedding_provider
@@ -27,8 +28,6 @@ class HybridRetriever:
 
         # Step 1: Query eligible documents from DB based on revision governance
         doc_query = db.query(Document)
-        if query_param.filter_approved_only:
-            doc_query = doc_query.filter(Document.approval_status == "Approved")
         if query_param.machine_model:
             doc_query = doc_query.filter(
                 (Document.machine_model == query_param.machine_model) | (Document.machine_model == "ALL")
@@ -36,7 +35,15 @@ class HybridRetriever:
         if query_param.target_document_id:
             doc_query = doc_query.filter(Document.id == query_param.target_document_id)
 
-        valid_docs = doc_query.all()
+        candidates = doc_query.all()
+        authority_by_doc = {
+            doc.id: revision_governance.evaluate_authority(doc).is_authoritative
+            for doc in candidates
+        }
+        valid_docs = [
+            doc for doc in candidates
+            if not query_param.filter_approved_only or authority_by_doc[doc.id]
+        ]
         doc_map = {d.id: d for d in valid_docs}
         valid_doc_ids = list(doc_map.keys())
 
@@ -137,7 +144,7 @@ class HybridRetriever:
                         document_title=d.title,
                         revision=d.revision,
                         approval_status=d.approval_status,
-                        is_authoritative=(d.approval_status == "Approved"),
+                        is_authoritative=authority_by_doc[d.id],
                         page_number=c.page_number,
                         section_title=c.section_title,
                         content=c.content,
@@ -166,7 +173,7 @@ class HybridRetriever:
                         document_title=d.title,
                         revision=d.revision,
                         approval_status=d.approval_status,
-                        is_authoritative=(d.approval_status == "Approved"),
+                        is_authoritative=authority_by_doc[d.id],
                         page_number=c.page_number,
                         section_title=c.section_title,
                         content=c.content,
@@ -193,7 +200,7 @@ class HybridRetriever:
                         document_title=d.title,
                         revision=d.revision,
                         approval_status=d.approval_status,
-                        is_authoritative=(d.approval_status == "Approved"),
+                        is_authoritative=authority_by_doc[d.id],
                         page_number=c.page_number,
                         section_title=c.section_title,
                         content=c.content,

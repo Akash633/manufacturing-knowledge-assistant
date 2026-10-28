@@ -15,6 +15,9 @@ class ReviewItem(Base):
     
     status = Column(String(32), index=True, default="pending")
     # Statuses: pending, approved, rejected, escalated, resolved
+
+    origin = Column(String(24), nullable=True, default="operational")
+    # Legacy rows are classified from linked audit events when their origin is null.
     
     priority = Column(String(16), default="medium")
     # Priorities: low, medium, high, critical

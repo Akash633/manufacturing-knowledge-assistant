@@ -22,11 +22,73 @@ export interface DocumentItem {
   file_path: string;
   file_type: string;
   file_size_bytes: number;
+  is_synthetic_demo: boolean;
   checksum: string | null;
   page_count: number;
   chunk_count: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface DocumentDetails {
+  document: DocumentItem;
+  authority_evaluation: {
+    is_authoritative: boolean;
+    status: string;
+    reason: string;
+  };
+  chunks: Array<{
+    id: string;
+    chunk_index: number;
+    page_number: number;
+    section_title: string;
+    content: string;
+    token_count: number;
+    has_images: boolean;
+    image_paths: string[];
+    ocr_applied: boolean;
+  }>;
+}
+
+export interface DocumentSummary {
+  total_documents: number;
+  synthetic_documents: number;
+  status_counts: Record<string, number>;
+}
+
+export interface RevisionRecord {
+  id: string;
+  document_number: string;
+  title: string;
+  revision: string;
+  approval_status: string;
+  machine_model: string;
+  section_category: string;
+  effective_date: string | null;
+  expiry_date: string | null;
+  superseded_by_id: string | null;
+  supersedes_id: string | null;
+  is_authoritative: boolean;
+  authority_reason: string;
+  page_count: number;
+  chunk_count: number;
+  updated_at: string;
+}
+
+export interface SystemHealth {
+  status: string;
+  timestamp: string;
+  environment: string;
+  embedding_provider: string;
+  llm_provider: string;
+  demo_mode: boolean;
+  authentication_configured: boolean;
+  max_file_size_mb: number;
+}
+
+export interface AuthenticatedProfile {
+  subject: string;
+  roles: string[];
 }
 
 export interface RetrievedPassage {
@@ -107,12 +169,19 @@ export interface DocumentConflict {
   severity: 'high' | 'critical' | 'medium';
   recommended_action: string;
   status: string;
+  winning_document_id?: string | null;
+  resolution_action?: string | null;
+  resolution_notes?: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
 }
 
 export interface ReviewItem {
   id: string;
   item_type: string;
   status: string;
+  origin: 'operational' | 'benchmark' | 'legacy_unclassified';
+  origin_evidence: string;
   priority: string;
   title: string;
   summary: string;

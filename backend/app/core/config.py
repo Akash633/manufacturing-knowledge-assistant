@@ -10,7 +10,7 @@ WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 class Settings(BaseSettings):
     APP_NAME: str = "Revision-Aware Multimodal Manufacturing AI Assistant"
     ENVIRONMENT: str = "development"
-    DEBUG: bool = True
+    DEBUG: bool = False
     PORT: int = 8000
     HOST: str = "0.0.0.0"
 
@@ -44,7 +44,14 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     LOCAL_MODEL_ENDPOINT: Optional[str] = None
 
+    # OIDC bearer-token verification for protected write operations
+    OIDC_ISSUER: Optional[str] = None
+    OIDC_AUDIENCE: Optional[str] = None
+    OIDC_JWKS_URL: Optional[str] = None
+    OIDC_ROLES_CLAIM: str = "roles"
+
     # Safety & Governance
+    DEMO_MODE: bool = True
     STRICT_REVISION_FILTER: bool = True
     ALLOW_SUPERSEDED_FALLBACK: bool = False
     HIGH_RISK_MANDATORY_REVIEW: bool = True

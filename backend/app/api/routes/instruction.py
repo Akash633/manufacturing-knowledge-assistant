@@ -1,8 +1,9 @@
 import json
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.auth import AuthenticatedUser, get_optional_user, require_roles
 from app.db.session import get_db
 from app.models.instruction import DraftWorkInstruction
 from app.schemas.instruction import WorkInstructionCreateRequest, WorkInstructionResponse, InstructionStep
@@ -14,13 +15,18 @@ router = APIRouter(prefix="/instructions", tags=["Work Instructions"])
 def create_draft_work_instruction(
     req: WorkInstructionCreateRequest,
     db: Session = Depends(get_db),
+    user: Optional[AuthenticatedUser] = Depends(get_optional_user),
 ):
     """
     Generates a draft work instruction derived strictly from approved shop-floor documentation.
     Must remain unpublished until an authorized specialist approves it.
     """
     try:
-        draft = instruction_service.create_draft(db, req, created_by="operator_planner")
+        draft = instruction_service.create_draft(
+            db,
+            req,
+            created_by=user.subject if user else "assistant_generator",
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -51,17 +57,23 @@ def get_work_instruction(instruction_id: str, db: Session = Depends(get_db)):
 @router.post("/{instruction_id}/approve", response_model=WorkInstructionResponse)
 def approve_work_instruction(
     instruction_id: str,
-    reviewer_name: str = Body(default="Senior Quality Engineer"),
-    comments: str = Body(default="Verified against approved machine documentation."),
+    comments: str = Body(default="Authorized review recorded.", embed=True),
     db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(require_roles("instruction_approver")),
 ):
     """
     Authorized sign-off releasing the draft work instruction to published status.
     """
     try:
-        updated = instruction_service.approve_draft(db, instruction_id, reviewer_name, comments)
+        updated = instruction_service.approve_draft(
+            db,
+            instruction_id,
+            user.subject,
+            comments,
+        )
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        status_code = 404 if "not found" in str(e).lower() else 409
+        raise HTTPException(status_code=status_code, detail=str(e))
 
     return _format_instruction_response(updated)
 

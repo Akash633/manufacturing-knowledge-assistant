@@ -1,10 +1,12 @@
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.auth import AuthenticatedUser, require_roles, require_user_role
 from app.db.session import get_db
 from app.models.document import Document
 from app.models.audit import AuditLog
+from app.models.conflict_resolution import ConflictResolution
 from app.schemas.governance import DocumentConflict, ConflictResolutionRequest
 from app.governance.conflict_detector import conflict_detector
 from app.governance.revision_rules import revision_governance
@@ -13,29 +15,85 @@ from app.services.audit_service import audit_service
 router = APIRouter(prefix="/governance", tags=["Revision Governance"])
 
 @router.get("/conflicts", response_model=List[DocumentConflict])
-def get_document_conflicts(db: Session = Depends(get_db)):
+def get_document_conflicts(
+    machine_model: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
     """
     Scans active approved documents and quality alerts to detect
     conflicting operating limits or contradictory technical parameters.
     """
-    return conflict_detector.scan_for_conflicts(db)
+    return conflict_detector.scan_for_conflicts(db, machine_model=machine_model)
 
 @router.post("/conflicts/resolve")
 def resolve_document_conflict(
     req: ConflictResolutionRequest,
     db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(require_roles("conflict_resolver")),
 ):
     """
     Records an authorized human resolution for a detected technical conflict.
     """
-    if req.winning_document_id and req.action_taken == "mark_superseded":
-        # Supersede the other document
-        pass
+    conflict = next(
+        (
+            item
+            for item in conflict_detector.scan_for_conflicts(db)
+            if item.conflict_id == req.conflict_id
+        ),
+        None,
+    )
+    if conflict is None:
+        raise HTTPException(status_code=404, detail="Active conflict not found.")
+    if conflict.status == "resolved":
+        raise HTTPException(status_code=409, detail="This conflict has already been resolved.")
+    if req.winning_document_id not in {
+        conflict.document_a_id,
+        conflict.document_b_id,
+    }:
+        raise HTTPException(
+            status_code=400,
+            detail="Select one of the documents involved in this conflict as the governing source.",
+        )
+
+    if req.action_taken in {"mark_superseded", "withdraw_conflicting"}:
+        require_user_role(user, "document_approver")
+        losing_document_id = (
+            conflict.document_b_id
+            if req.winning_document_id == conflict.document_a_id
+            else conflict.document_a_id
+        )
+        losing_document = (
+            db.query(Document)
+            .filter(Document.id == losing_document_id)
+            .first()
+        )
+        if losing_document is None:
+            raise HTTPException(status_code=409, detail="A conflicting document no longer exists.")
+        if req.action_taken == "mark_superseded":
+            losing_document.approval_status = "Superseded"
+            losing_document.superseded_by_id = req.winning_document_id
+        else:
+            losing_document.approval_status = "Withdrawn"
+            losing_document.superseded_by_id = None
+
+    resolution = ConflictResolution(
+        conflict_id=conflict.conflict_id,
+        parameter_or_topic=conflict.parameter_or_topic,
+        document_a_id=conflict.document_a_id,
+        document_b_id=conflict.document_b_id,
+        winning_document_id=req.winning_document_id,
+        action_taken=req.action_taken,
+        resolution_notes=req.resolution_notes,
+        resolver=user.subject,
+    )
+    db.add(resolution)
+    db.commit()
+    db.refresh(resolution)
 
     audit_service.log_action(
         db=db,
         action="CONFLICT_RESOLVED",
-        actor=req.resolver,
+        actor=user.subject,
         resource_type="document_conflict",
         resource_id=req.conflict_id,
         details={
@@ -47,7 +105,9 @@ def resolve_document_conflict(
     return {
         "status": "resolved",
         "conflict_id": req.conflict_id,
-        "message": f"Conflict {req.conflict_id} resolved by {req.resolver}."
+        "winning_document_id": resolution.winning_document_id,
+        "action_taken": resolution.action_taken,
+        "message": "Conflict resolution recorded and applied to future conflict scans.",
     }
 
 @router.get("/revision-matrix")

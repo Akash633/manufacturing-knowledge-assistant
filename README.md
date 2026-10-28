@@ -49,6 +49,7 @@ An intelligent, grounded manufacturing knowledge assistant tailored for CNC mach
 7. **Empirical Evaluation Dashboard**
    - Evaluates Recall@1, Recall@3, Recall@5, Citation validity precision, Abstention accuracy, Conflict detection rate, and Latency.
    - Real benchmark runs compare baseline BM25 vs Proposed Hybrid RRF retrieval.
+   - Benchmark-generated review history is retained but excluded from the operational pending queue. Legacy safety records use direct escalation-audit links; conflict records require an exact question match to a query audit event within one second. Records without reliable audit evidence remain visible as unclassified operational items. Use `origin=benchmark` or `origin=all` on `/api/review/queue` to inspect retained evaluation history.
 
 ---
 
@@ -144,6 +145,45 @@ npm run dev
 Visit the dashboard in your web browser: **`http://localhost:5173`**  
 Access the interactive FastAPI Swagger API documentation: **`http://127.0.0.1:8000/docs`**
 
+For frontend sign-in, copy `frontend/.env.example` to `frontend/.env` and set
+`VITE_OIDC_AUTHORITY` and `VITE_OIDC_CLIENT_ID` to your identity-provider
+values. Set `VITE_OIDC_AUDIENCE` to the same API audience configured for the
+backend. Register the configured redirect URI with the identity provider.
+Without these frontend settings, the app remains in read-only mode.
+
+---
+
+## Authentication and protected actions
+
+Read-only demo endpoints remain available without authentication. Document uploads, status changes, document deletion, expert review actions,
+work-instruction approval, and conflict resolution require a verified OIDC
+bearer token. When OIDC is not configured, these actions fail closed with an
+HTTP 503 response.
+
+Configure the backend with the trusted identity provider's values:
+
+```env
+OIDC_ISSUER="https://identity.example.com/"
+OIDC_AUDIENCE="manufacturing-knowledge-assistant"
+OIDC_JWKS_URL="https://identity.example.com/.well-known/jwks.json"
+OIDC_ROLES_CLAIM="roles"
+```
+
+The token must have a valid RS256 signature, matching issuer and audience, a
+subject, and a list or string role claim. Assign roles through the trusted
+identity provider, not request fields:
+
+- `document_uploader`: upload draft documents
+- `document_approver`: non-draft upload, superseding upload, and document status changes
+- `expert_reviewer`: expert review actions
+- `instruction_approver`: work-instruction approval
+- `conflict_resolver`: conflict resolution
+- `admin`: all protected actions, including document deletion
+
+The backend verifies tokens against the configured JWKS URL. Use HTTPS and
+provider-managed signing keys in production. Install the added JWT dependency
+with the normal backend requirements command after configuring the provider.
+
 ---
 
 ## Running Automated Tests
@@ -153,12 +193,13 @@ Run the full pytest suite:
 python -m pytest backend/app/tests -v
 ```
 
-All 15 automated unit and integration tests will execute:
+All 24 automated unit and integration tests will execute:
 - Document parsing and checksum validation (`test_ingestion.py`)
 - BM25, Dense Vector, and RRF rank fusion (`test_retrieval.py`)
 - Revision authority evaluation and conflict detection (`test_governance.py`)
 - Grounded Q&A, citation validation, and abstention (`test_qa.py`)
 - Deterministic safety escalation and LOTO enforcement (`test_safety.py`)
+- OIDC authorization, upload limits, and OpenAI fallback reporting (`test_auth_and_provider.py`)
 
 ---
 

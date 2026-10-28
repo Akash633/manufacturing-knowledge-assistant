@@ -1,13 +1,14 @@
 import json
+import re
 import uuid
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from app.models.document import Document
 from app.models.instruction import DraftWorkInstruction
 from app.models.review import ReviewItem
 from app.schemas.instruction import WorkInstructionCreateRequest, InstructionStep
+from app.schemas.retrieval import RetrievalQuery
+from app.retrieval.hybrid import hybrid_retriever
 from app.services.audit_service import audit_service
-from app.core.logging import logger
 
 class WorkInstructionService:
     """
@@ -24,73 +25,68 @@ class WorkInstructionService:
         req: WorkInstructionCreateRequest,
         created_by: str = "assistant_generator"
     ) -> DraftWorkInstruction:
-        
-        # Verify approved source documents for the machine model
-        approved_docs = (
-            db.query(Document)
-            .filter(
-                Document.approval_status == "Approved",
-                (Document.machine_model == req.machine_model) | (Document.machine_model == "ALL"),
-            )
-            .all()
+        query_text = " ".join(
+            part for part in (req.title, req.target_operation, req.task_summary) if part
         )
-        approved_doc_ids = [d.id for d in approved_docs]
-        approved_doc_numbers = [d.document_number for d in approved_docs]
+        retrieval = hybrid_retriever.search(
+            db,
+            RetrievalQuery(
+                query=query_text[:500],
+                top_k=20,
+                filter_approved_only=True,
+                machine_model=req.machine_model,
+            ),
+        )
+        stop_words = {
+            "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+            "in", "into", "is", "of", "on", "or", "the", "to", "with",
+        }
+        query_terms = {
+            token
+            for token in re.findall(r"[a-z0-9]+", query_text.lower())
+            if token not in stop_words and token not in {"demo", "cnc"}
+        }
+        minimum_matches = min(2, len(query_terms))
+        evidence = [
+            passage
+            for passage in retrieval.results
+            if query_terms and passage.is_authoritative
+            and len(
+                query_terms.intersection(
+                    re.findall(r"[a-z0-9]+", passage.content.lower())
+                )
+            ) >= minimum_matches
+        ]
 
-        if req.require_approved_sources_only and not approved_doc_ids:
+        if req.require_approved_sources_only and not evidence:
             raise ValueError(
-                f"Cannot generate work instructions: No approved operational documents found for {req.machine_model}."
+                f"Cannot create a draft: no approved evidence matched the requested task for {req.machine_model}."
             )
 
         instruction_num = f"WI-{req.machine_model[:3]}-{uuid.uuid4().hex[:6].upper()}"
-
-        # Synthesize domain-compliant standard operating steps based on approved context
+        evidence = evidence[:5]
+        approved_doc_ids = list(dict.fromkeys(passage.document_id for passage in evidence))
+        approved_doc_numbers = list(dict.fromkeys(passage.document_number for passage in evidence))
         steps = [
             InstructionStep(
-                step_number=1,
-                title="Personal Protective Equipment (PPE) & Area Clearance",
-                description="Don required PPE: ANSI Z87.1 approved safety glasses with side shields, steel-toe boots, and hearing protection. Ensure chips are cleared from table.",
-                safety_hazard="Flying metal swarf and coolant splash hazards.",
-                verification_check="Operator PPE verified before touching control console.",
-                source_citation=f"Approved Standard {approved_doc_numbers[0] if approved_doc_numbers else 'SOP-CNC-001'}",
-            ),
-            InstructionStep(
-                step_number=2,
-                title="Machine Warm-Up & Spindle Thermal Stabilization",
-                description="Execute designated spindle warm-up cycle at 1,500 RPM for 5 minutes, followed by 3,000 RPM for 5 minutes. Verify flood coolant flow.",
-                safety_hazard="Spindle bearing seizure if run at high RPM from cold start.",
-                verification_check="Spindle temperature gauge indicates normal operating band.",
-                source_citation=f"Approved Standard {approved_doc_numbers[0] if approved_doc_numbers else 'SOP-CNC-001'}",
-            ),
-            InstructionStep(
-                step_number=3,
-                title="Hydraulic Chuck & Workpiece Clamping Verification",
-                description="Mount test billet in 3-jaw chuck. Check hydraulic clamping pressure on regulator gauge (must read within 2.5 - 3.0 MPa).",
-                safety_hazard="Part ejection during high-speed rotation if clamp pressure is insufficient.",
-                verification_check="Pressure gauge verified and mechanical dial indicator runout < 0.005 mm.",
-                source_citation="Approved Technical Specs",
-            ),
-            InstructionStep(
-                step_number=4,
-                title="Tool Setter Calibration & Work Coordinate Zeroing",
-                description="Touch off tool probe on G54 reference datum. Verify zero offsets on CNC controller display.",
-                safety_hazard="Z-axis collision if tool offset is incorrectly inverted.",
-                verification_check="Dry run test executed at 25% rapid override.",
-                source_citation="Approved Technical Specs",
-            ),
+                step_number=index,
+                title=(
+                    f"Source evidence: {passage.document_number} {passage.revision}, "
+                    f"page {passage.page_number}"
+                ),
+                description=passage.content,
+                verification_check="Reviewer must verify this excerpt against the cited source before approval.",
+                source_citation=(
+                    f"{passage.document_number} ({passage.revision}), "
+                    f"page {passage.page_number}, chunk {passage.chunk_id}"
+                ),
+            )
+            for index, passage in enumerate(evidence, start=1)
         ]
 
         safety_warnings = [
-            "SYNTHETIC DEMONSTRATION DATA. NOT VALID FOR REAL MACHINE OPERATION.",
-            "Never bypass door interlocks or operate machine with enclosure open.",
-            "Verify all tool clamp retainers before initiating spindle rotation.",
-        ]
-
-        required_ppe = [
-            "ANSI Z87.1 Safety Glasses",
-            "Steel-Toe Safety Boots",
-            "Hearing Protection (NRR 25+)",
-            "Nitrile gloves for coolant handling (remove before spindle rotation)",
+            "Draft evidence summary only; it does not authorize machine operation.",
+            "A qualified reviewer must validate each cited source and all safety controls before approval.",
         ]
 
         draft = DraftWorkInstruction(
@@ -101,7 +97,7 @@ class WorkInstructionService:
             approved_source_doc_ids_json=json.dumps(approved_doc_ids),
             steps_json=json.dumps([s.model_dump() for s in steps]),
             safety_warnings_json=json.dumps(safety_warnings),
-            required_ppe_json=json.dumps(required_ppe),
+            required_ppe_json=json.dumps([]),
             status="pending_review",
             is_published=False, # STRICT REQUIREMENT: unpublished until reviewed
             created_by=created_by,
@@ -115,6 +111,7 @@ class WorkInstructionService:
         review_item = ReviewItem(
             item_type="draft_work_instruction",
             status="pending",
+            origin="operational",
             priority="high",
             title=f"Review Draft Work Instruction: {draft.instruction_number}",
             summary=f"New draft work instruction created for '{req.title}' ({req.machine_model}). Requires authorized sign-off.",
@@ -150,11 +147,28 @@ class WorkInstructionService:
         draft = db.query(DraftWorkInstruction).filter(DraftWorkInstruction.id == instruction_id).first()
         if not draft:
             raise ValueError(f"Draft work instruction {instruction_id} not found")
+        if draft.is_published or draft.status != "pending_review":
+            raise ValueError(f"Work instruction {instruction_id} has already been reviewed.")
 
         draft.status = "approved"
         draft.is_published = True # Published upon authorized sign-off
         draft.reviewed_by = reviewer_name
         draft.review_comments = comments
+        review_items = (
+            db.query(ReviewItem)
+            .filter(
+                ReviewItem.item_type == "draft_work_instruction",
+                ReviewItem.status == "pending",
+            )
+            .all()
+        )
+        for item in review_items:
+            details = json.loads(item.details_json) if item.details_json else {}
+            if details.get("instruction_id") == draft.id:
+                item.status = "approved"
+                item.expert_notes = comments
+                item.reviewer = reviewer_name
+                item.resolved_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(draft)
 

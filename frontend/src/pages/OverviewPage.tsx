@@ -1,214 +1,191 @@
 import React, { useEffect, useState } from 'react';
-import { api } from '../services/api';
 import { NavTab } from '../components/Navbar';
+import { api, ApiError } from '../services/api';
+import { DocumentSummary, SystemHealth } from '../types';
 
 interface OverviewPageProps {
+  machineModel: string;
   onNavigate: (tab: NavTab) => void;
 }
 
-export const OverviewPage: React.FC<OverviewPageProps> = ({ onNavigate }) => {
-  const [stats, setStats] = useState({
-    totalDocs: 0,
-    approvedDocs: 0,
-    supersededDocs: 0,
-    conflicts: 0,
-    pendingReviews: 0,
-  });
-  const [auditLogs, setAuditLogs] = useState<any[]>([]);
+interface OverviewData {
+  summary: DocumentSummary;
+  conflicts: number;
+  pendingReviews: number;
+  auditLogs: Array<Record<string, unknown>>;
+}
+
+export const OverviewPage: React.FC<OverviewPageProps> = ({ machineModel, onNavigate }) => {
+  const [data, setData] = useState<OverviewData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    loadOverviewData();
-  }, []);
-
-  const loadOverviewData = async () => {
-    try {
-      setLoading(true);
-      const [docsData, conflictsData, reviewData, auditData] = await Promise.all([
-        api.getDocuments(),
-        api.getConflicts(),
-        api.getReviewQueue('pending'),
-        api.getAuditTrail(),
-      ]);
-
-      const items = docsData.items || [];
-      setStats({
-        totalDocs: items.length,
-        approvedDocs: items.filter((d) => d.approval_status === 'Approved').length,
-        supersededDocs: items.filter((d) => d.approval_status === 'Superseded').length,
-        conflicts: conflictsData.length,
-        pendingReviews: reviewData.length,
+    let active = true;
+    setLoading(true);
+    Promise.all([
+      api.getDocumentSummary(),
+      api.getConflicts(machineModel),
+      api.getReviewQueue('pending'),
+      api.getAuditTrail(),
+    ])
+      .then(([summary, conflicts, reviews, auditLogs]) => {
+        if (!active) return;
+        setData({
+          summary,
+          conflicts: conflicts.filter((conflict) => conflict.status !== 'resolved').length,
+          pendingReviews: reviews.length,
+          auditLogs: auditLogs.slice(0, 8),
+        });
+        setError(null);
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setData(null);
+        setError(reason instanceof ApiError ? reason.message : 'Dashboard data could not be loaded.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
       });
-      setAuditLogs(auditData.slice(0, 8));
-    } catch (e) {
-      console.error('Error loading overview data:', e);
-    } finally {
-      setLoading(false);
-    }
-  };
+    return () => {
+      active = false;
+    };
+  }, [machineModel]);
+
+  const statusCounts = data?.summary.status_counts ?? {};
 
   return (
-    <div className="page-container space-y-6">
-      {/* Top Welcome Card */}
-      <div className="card" style={{ background: 'linear-gradient(135deg, #0e1a32 0%, #13223f 100%)', borderColor: '#28416d' }}>
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="badge badge-approved">SYSTEM ONLINE</span>
-              <span className="text-xs text-slate-400 font-mono">REVISION GOVERNANCE ACTIVE</span>
-            </div>
-            <h2 className="text-xl font-bold text-white tracking-wide">
-              Revision-Aware Manufacturing Assistant
-            </h2>
-            <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
-              Traceable shop-floor knowledge operations for <strong>DEMO-CNC-01</strong>. All answers strictly ground in authorized SOPs and maintenance logs with verifiable citation validation.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <button onClick={() => onNavigate('assistant')} className="btn btn-primary">
-              💬 Open Assistant
-            </button>
-            <button onClick={() => onNavigate('evaluation')} className="btn btn-secondary">
-              ⚡ Benchmark Suite
-            </button>
-          </div>
+    <div className="page-container">
+      <section className="page-heading">
+        <div>
+          <p className="eyebrow">Operations overview</p>
+          <h1>Knowledge operations</h1>
+          <p className="page-description">
+            Document authority, human review and recent system activity for <strong>{machineModel}</strong>.
+          </p>
         </div>
-      </div>
-
-      {/* KPI Cards Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <div className="card text-center py-4" style={{ backgroundColor: 'var(--bg-card)' }}>
-          <div className="text-[11px] text-slate-400 font-bold uppercase tracking-wider">Total Documents</div>
-          <div className="text-2xl font-bold font-mono text-cyan-400 mt-1">{loading ? '...' : stats.totalDocs}</div>
-          <div className="text-[11px] text-slate-400 mt-0.5 font-mono">PDF & DOCX</div>
+        <div className="heading-actions">
+          <button type="button" className="btn btn-secondary" onClick={() => onNavigate('library')}>
+            Browse documents
+          </button>
+          <button type="button" className="btn btn-primary" onClick={() => onNavigate('assistant')}>
+            Open assistant
+          </button>
         </div>
+      </section>
 
-        <div className="card text-center py-4">
-          <div className="text-[11px] text-slate-400 font-bold uppercase tracking-wider">Approved Active</div>
-          <div className="text-2xl font-bold font-mono text-emerald-400 mt-1">{loading ? '...' : stats.approvedDocs}</div>
-          <div className="text-[11px] text-emerald-400/80 mt-0.5 font-mono">Authoritative</div>
+      {error && (
+        <div className="notice notice-error" role="alert">
+          <strong>Overview unavailable.</strong> {error}
         </div>
+      )}
 
-        <div className="card text-center py-4">
-          <div className="text-[11px] text-slate-400 font-bold uppercase tracking-wider">Superseded / Draft</div>
-          <div className="text-2xl font-bold font-mono text-red-400 mt-1">{loading ? '...' : stats.supersededDocs}</div>
-          <div className="text-[11px] text-slate-400 mt-0.5 font-mono">Non-Authoritative</div>
+      <section className="metric-grid" aria-label="Operational summaries">
+        <Metric label="Documents" value={loading ? null : data?.summary.total_documents} detail="All recorded revisions" />
+        <Metric label="Approved" value={loading ? null : statusCounts.Approved ?? 0} detail="Status only; check authority dates" tone="positive" />
+        <Metric label="Superseded" value={loading ? null : statusCounts.Superseded ?? 0} detail="Retained for revision history" />
+        <Metric label="Open conflicts" value={loading ? null : data?.conflicts} detail="Human resolution required" tone="warning" onClick={() => onNavigate('conflicts')} />
+        <Metric label="Pending review" value={loading ? null : data?.pendingReviews} detail="Benchmark history excluded; unverified history retained" onClick={() => onNavigate('review')} />
+      </section>
+
+      {data && data.summary.synthetic_documents > 0 && (
+        <div className="notice notice-warning" role="note">
+          <strong>{data.summary.synthetic_documents} synthetic document(s)</strong> are present in the registry. Synthetic records are not operational authority.
         </div>
+      )}
 
-        <div className="card text-center py-4 cursor-pointer hover:border-amber-500/60" onClick={() => onNavigate('conflicts')}>
-          <div className="text-[11px] text-slate-400 font-bold uppercase tracking-wider">Detected Conflicts</div>
-          <div className="text-2xl font-bold font-mono text-amber-400 mt-1">{loading ? '...' : stats.conflicts}</div>
-          <div className="text-[11px] text-amber-400/80 mt-0.5 font-mono">Discrepancy Alerts</div>
-        </div>
-
-        <div className="card text-center py-4 cursor-pointer hover:border-red-500/60" onClick={() => onNavigate('review')}>
-          <div className="text-[11px] text-slate-400 font-bold uppercase tracking-wider">Review Queue</div>
-          <div className="text-2xl font-bold font-mono text-cyan-300 mt-1">{loading ? '...' : stats.pendingReviews}</div>
-          <div className="text-[11px] text-slate-400 mt-0.5 font-mono">Pending Sign-off</div>
-        </div>
-      </div>
-
-      {/* Two Column Layout: Equipment Spec & Recent Audits */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Left: Machine Profile */}
-        <div className="card space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+      <div className="overview-grid">
+        <section className="panel">
+          <div className="panel-heading">
             <div>
-              <h3 className="font-bold text-white text-sm uppercase tracking-wide">Target Machine Spec</h3>
-              <p className="text-[11px] text-slate-400">DEMO-CNC-01 Physical Limits</p>
+              <p className="eyebrow">Document registry</p>
+              <h2>Approval status</h2>
             </div>
-            <span className="badge badge-approved text-[10px]">CONNECTED</span>
-          </div>
-
-          <div className="space-y-2.5 text-xs">
-            <div className="flex justify-between py-1 border-b border-slate-800/60">
-              <span className="text-slate-400">Machine Model:</span>
-              <span className="font-mono font-bold text-cyan-400">DEMO-CNC-01</span>
-            </div>
-            <div className="flex justify-between py-1 border-b border-slate-800/60">
-              <span className="text-slate-400">Spindle Taper:</span>
-              <span className="font-mono text-white">BT40 / 12,000 Max RPM</span>
-            </div>
-            <div className="flex justify-between py-1 border-b border-slate-800/60">
-              <span className="text-slate-400">Coolant Pressure:</span>
-              <span className="font-mono text-white">2.5 bar (Flood)</span>
-            </div>
-            <div className="flex justify-between py-1 border-b border-slate-800/60">
-              <span className="text-slate-400">X-Backlash Limit:</span>
-              <span className="font-mono text-emerald-400">0.008 mm (Measured: 0.004)</span>
-            </div>
-            <div className="flex justify-between py-1 border-b border-slate-800/60">
-              <span className="text-slate-400">Governing SOP:</span>
-              <span className="font-mono text-cyan-300 font-semibold">SOP-CNC-001 (Rev B)</span>
-            </div>
-            <div className="flex justify-between py-1">
-              <span className="text-slate-400">Active Quality Alert:</span>
-              <span className="font-mono text-amber-400 font-semibold">QA-CNC-2024-03</span>
-            </div>
-          </div>
-
-          <div className="pt-2 border-t border-slate-800">
-            <button onClick={() => onNavigate('library')} className="btn btn-secondary w-full text-xs py-2">
-              Inspect Linked Documents ({stats.totalDocs})
+            <button type="button" className="text-button" onClick={() => onNavigate('library')}>
+              View library
             </button>
           </div>
-        </div>
+          {loading ? (
+            <div className="loading-state" role="status">Loading document summary…</div>
+          ) : data ? (
+            <dl className="status-list">
+              {Object.entries(statusCounts).length === 0 ? (
+                <div className="empty-state">No documents have been registered.</div>
+              ) : Object.entries(statusCounts).map(([status, count]) => (
+                <div className="status-row" key={status}>
+                  <dt>{status}</dt>
+                  <dd>{count}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+          <p className="panel-footnote">
+            Approval status is not a substitute for effective-date, expiry-date or machine-scope checks.
+          </p>
+        </section>
 
-        {/* Right 2 cols: Traceable Audit Trail */}
-        <div className="card md:col-span-2 space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <section className="panel">
+          <div className="panel-heading">
             <div>
-              <h3 className="font-bold text-white text-sm uppercase tracking-wide">Shop Floor Audit Ledger</h3>
-              <p className="text-[11px] text-slate-400">Traceable chronological ledger of document ingestions, queries, and safety events</p>
+              <p className="eyebrow">Audit trail</p>
+              <h2>Recent activity</h2>
             </div>
-            <button onClick={loadOverviewData} className="btn btn-secondary text-xs py-1 px-3">
-              🔄 Refresh
+            <button
+              type="button"
+              className="text-button"
+              onClick={() => window.location.reload()}
+              disabled={loading}
+            >
+              Refresh
             </button>
           </div>
-
-          <div className="overflow-x-auto">
-            <table>
-              <thead>
-                <tr>
-                  <th>Timestamp</th>
-                  <th>Action</th>
-                  <th>Actor</th>
-                  <th>Resource</th>
-                  <th>Details</th>
-                </tr>
-              </thead>
-              <tbody>
-                {auditLogs.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="text-center text-slate-500 py-6">
-                      No audit events recorded yet.
-                    </td>
-                  </tr>
-                ) : (
-                  auditLogs.map((log) => {
-                    const dt = new Date(log.timestamp).toLocaleTimeString();
-                    return (
-                      <tr key={log.id}>
-                        <td className="font-mono text-xs text-slate-400 whitespace-nowrap">{dt}</td>
-                        <td>
-                          <span className="badge badge-pending text-[10px]">
-                            {log.action}
-                          </span>
-                        </td>
-                        <td className="text-xs text-slate-300 whitespace-nowrap">{log.actor}</td>
-                        <td className="font-mono text-xs text-slate-400 whitespace-nowrap">{log.resource_type}</td>
-                        <td className="text-xs text-slate-300 font-mono truncate max-w-xs">
-                          {log.details_json}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+          {loading ? (
+            <div className="loading-state" role="status">Loading audit events…</div>
+          ) : data?.auditLogs.length ? (
+            <div className="activity-list">
+              {data.auditLogs.map((log) => (
+                <article className="activity-item" key={String(log.id)}>
+                  <div className="activity-main">
+                    <strong>{String(log.action || 'Event')}</strong>
+                    <span>{String(log.resource_type || 'system')}</span>
+                  </div>
+                  <div className="activity-meta">
+                    <span>{String(log.actor || 'Unknown actor')}</span>
+                    <time>{log.timestamp ? new Date(String(log.timestamp)).toLocaleString() : 'Time unavailable'}</time>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : data ? (
+            <div className="empty-state">No audit events have been recorded.</div>
+          ) : null}
+        </section>
       </div>
     </div>
+  );
+};
+
+interface MetricProps {
+  label: string;
+  value: number | null | undefined;
+  detail: string;
+  tone?: 'positive' | 'warning';
+  onClick?: () => void;
+}
+
+const Metric: React.FC<MetricProps> = ({ label, value, detail, tone, onClick }) => {
+  const content = (
+    <>
+      <span className="metric-label">{label}</span>
+      <strong className={`metric-value ${tone ? `tone-${tone}` : ''}`}>
+        {value === null || value === undefined ? '—' : value.toLocaleString()}
+      </strong>
+      <span className="metric-detail">{detail}</span>
+    </>
+  );
+  return onClick ? (
+    <button type="button" className="metric-card metric-action" onClick={onClick}>{content}</button>
+  ) : (
+    <div className="metric-card">{content}</div>
   );
 };

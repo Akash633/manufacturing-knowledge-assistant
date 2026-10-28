@@ -1,11 +1,13 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
 
 class ReviewItemResponse(BaseModel):
     id: str
     item_type: str
     status: str
+    origin: Literal["operational", "benchmark", "legacy_unclassified"]
+    origin_evidence: str
     priority: str
     title: str
     summary: str
@@ -19,6 +21,5 @@ class ReviewItemResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 class ReviewActionRequest(BaseModel):
-    action: str = Field(..., description="'approve', 'reject', 'escalate', or 'resolve'")
+    action: Literal["approved", "rejected", "escalated"] = Field(...)
     expert_notes: str = Field(..., min_length=3)
-    reviewer_name: str = Field(default="Senior Manufacturing Specialist")

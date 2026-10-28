@@ -1,335 +1,323 @@
-import React, { useEffect, useState } from 'react';
-import { api } from '../services/api';
+import React, { FormEvent, useEffect, useState } from 'react';
+import { useAuth } from '../auth/AuthContext';
+import { api, ApiError } from '../services/api';
 import { ReviewItem, WorkInstruction } from '../types';
 
-export const ReviewQueuePage: React.FC = () => {
+interface ReviewQueuePageProps {
+  machineModel: string;
+}
+
+export const ReviewQueuePage: React.FC<ReviewQueuePageProps> = ({ machineModel }) => {
+  const { can, status: authStatus } = useAuth();
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [instructions, setInstructions] = useState<WorkInstruction[]>([]);
   const [statusFilter, setStatusFilter] = useState('pending');
+  const [originFilter, setOriginFilter] = useState<'operational' | 'benchmark' | 'all'>('operational');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<ReviewItem | null>(null);
   const [expertNotes, setExpertNotes] = useState('');
   const [acting, setActing] = useState(false);
-
-  // New Draft Instruction modal
   const [showDraftModal, setShowDraftModal] = useState(false);
   const [wiTitle, setWiTitle] = useState('');
   const [wiSummary, setWiSummary] = useState('');
   const [wiOperation, setWiOperation] = useState('');
   const [drafting, setDrafting] = useState(false);
-
-  useEffect(() => {
-    loadReviewData();
-  }, [statusFilter]);
+  const [draftResult, setDraftResult] = useState<string | null>(null);
 
   const loadReviewData = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
       const [queueData, wiData] = await Promise.all([
-        api.getReviewQueue(statusFilter || undefined),
+        api.getReviewQueue(statusFilter || undefined, originFilter),
         api.getWorkInstructions(),
       ]);
-      setItems(queueData || []);
-      setInstructions(wiData || []);
-    } catch (e: any) {
-      console.error(e);
+      setItems(queueData);
+      setInstructions(wiData.filter((instruction) => instruction.machine_model === machineModel));
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : 'Review data could not be loaded.');
     } finally {
       setLoading(false);
     }
   };
 
+  useEffect(() => {
+    void loadReviewData();
+  }, [machineModel, statusFilter, originFilter]);
+
   const handleAction = async (action: 'approved' | 'rejected' | 'escalated') => {
-    if (!selectedItem) return;
+    if (!selectedItem || expertNotes.trim().length < 3) return;
+    if (!window.confirm(`Confirm ${action} for "${selectedItem.title}"?`)) return;
+    setActing(true);
+    setError(null);
     try {
-      setActing(true);
-      await api.takeReviewAction(selectedItem.id, action, expertNotes || `Decision: ${action}`);
-      alert(`Review item status updated to ${action.toUpperCase()}`);
+      await api.takeReviewAction(selectedItem.id, action, expertNotes.trim());
       setSelectedItem(null);
       setExpertNotes('');
       await loadReviewData();
-    } catch (e: any) {
-      alert(`Action error: ${e.message}`);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : 'The review action could not be recorded.');
     } finally {
       setActing(false);
     }
   };
 
-  const handleDraftInstruction = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!wiTitle || !wiSummary) return;
-
+  const handleDraftInstruction = async (event: FormEvent) => {
+    event.preventDefault();
+    setDraftResult(null);
+    setError(null);
+    setDrafting(true);
     try {
-      setDrafting(true);
-      await api.draftWorkInstruction(wiTitle, wiSummary, wiOperation || 'Setup & Calibration');
+      const draft = await api.draftWorkInstruction(wiTitle, wiSummary, wiOperation || 'Setup and maintenance', machineModel);
+      setDraftResult(`${draft.instruction_number} created as an unpublished evidence draft.`);
       setShowDraftModal(false);
       setWiTitle('');
       setWiSummary('');
       setWiOperation('');
       await loadReviewData();
-      alert('Draft instruction created and placed in Pending Review queue. Remains unpublished until signed off.');
-    } catch (e: any) {
-      alert(`Draft error: ${e.message}`);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : 'A work-instruction draft could not be created.');
     } finally {
       setDrafting(false);
     }
   };
 
-  const handleApproveInstruction = async (id: string) => {
+  const handleApproveInstruction = async (instruction: WorkInstruction) => {
+    if (!window.confirm(`Approve and publish ${instruction.instruction_number}? Verify its cited evidence before proceeding.`)) return;
+    setError(null);
     try {
-      await api.approveWorkInstruction(id);
+      await api.approveWorkInstruction(instruction.id, 'Reviewed cited source evidence and safety controls.');
       await loadReviewData();
-      alert('Work instruction signed off and published for shop-floor operators.');
-    } catch (e: any) {
-      alert(`Approval error: ${e.message}`);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : 'The work instruction could not be approved.');
     }
   };
 
+  const reviewAllowed = can('expert_reviewer');
+  const instructionApproverAllowed = can('instruction_approver');
+
   return (
-    <div className="page-container space-y-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+    <div className="page-container">
+      <section className="page-heading">
         <div>
-          <h2 className="text-xl font-bold text-white flex items-center gap-2">
-            <span>🛡️ Expert Review Queue & Instruction Governance</span>
-            <span className="badge badge-pending text-xs">Human-in-the-Loop</span>
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            Mandatory sign-off for safety-critical queries, document conflicts, and draft work instructions.
-          </p>
+          <p className="eyebrow">Human governance</p>
+          <h1>Expert review queue</h1>
+          <p className="page-description">Review escalations and evidence-based draft instructions for {machineModel}. Approval and publication require verified roles.</p>
         </div>
-
-        <div className="flex items-center gap-3">
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="input-field py-1.5 text-xs w-auto"
-          >
-            <option value="pending">Pending Items Only</option>
-            <option value="">All Review History</option>
-          </select>
-
-          <button onClick={() => setShowDraftModal(true)} className="btn btn-primary text-xs">
-            📝 Draft New Work Instruction
+        <div className="heading-actions">
+          <label className="control-inline">
+            Queue
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="pending">Pending only</option>
+              <option value="">All review history</option>
+            </select>
+          </label>
+          <label className="control-inline">
+            Origin
+            <select
+              value={originFilter}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === 'operational' || value === 'benchmark' || value === 'all') {
+                  setOriginFilter(value);
+                }
+              }}
+            >
+              <option value="operational">Operational &amp; unclassified</option>
+              <option value="benchmark">Benchmark history</option>
+              <option value="all">All origins</option>
+            </select>
+          </label>
+          <button type="button" className="btn btn-primary" onClick={() => setShowDraftModal(true)}>
+            Create evidence draft
           </button>
         </div>
-      </div>
+      </section>
 
-      {/* Review Queue Items */}
-      <div className="space-y-4">
-        <h3 className="text-xs font-semibold uppercase text-slate-400 tracking-wider">
-          Items Awaiting Expert Action ({items.length})
-        </h3>
+      {!reviewAllowed && (
+        <div className="notice notice-neutral">
+          Review decisions require a verified <code>expert_reviewer</code> role.
+          {authStatus === 'unconfigured' && ' OIDC sign-in is not configured.'}
+        </div>
+      )}
+      {!instructionApproverAllowed && (
+        <div className="notice notice-neutral">
+          Publishing a work instruction requires a verified <code>instruction_approver</code> role.
+        </div>
+      )}
+      {error && <div className="notice notice-error" role="alert">{error}</div>}
+      {draftResult && <div className="notice notice-success" role="status">{draftResult}</div>}
 
-        {items.length === 0 && !loading && (
-          <div className="card text-center py-8 text-slate-400 text-xs">
-            ✓ No items pending review. All safety flags and discrepancies are resolved.
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Decision items</p>
+            <h2>Review queue <span className="count-badge">{items.length}</span></h2>
           </div>
-        )}
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <button type="button" className="text-button" onClick={() => void loadReviewData()} disabled={loading}>Refresh</button>
+        </div>
+        {loading ? <div className="loading-state">Loading review records…</div> : null}
+        {!loading && items.length === 0 && <div className="empty-state">No review items match this filter.</div>}
+        <div className="review-grid">
           {items.map((item) => (
-            <div key={item.id} className="card border-slate-700 space-y-3">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                <span className={`badge ${
-                  item.priority === 'critical' ? 'bg-red-900/50 text-red-300 border-red-700' :
-                  item.priority === 'high' ? 'bg-amber-900/50 text-amber-300 border-amber-700' : 'badge-draft'
-                }`}>
-                  {item.priority.toUpperCase()} PRIORITY
+            <article className="review-card" key={item.id}>
+              <div className="review-card-top">
+                <span className={`status-pill ${item.priority === 'critical' ? 'status-negative' : item.priority === 'high' ? 'status-warning' : 'status-neutral'}`}>
+                  {item.priority} priority
                 </span>
-                <span className="font-mono text-xs text-slate-400">{item.item_type}</span>
+                <span className="review-type">{item.item_type.replace(/_/g, ' ')}</span>
               </div>
-
-              <div>
-                <h4 className="font-bold text-white text-sm">{item.title}</h4>
-                <p className="text-xs text-slate-300 mt-1">{item.summary}</p>
-              </div>
-
-              <div className="p-2.5 bg-slate-950 rounded text-xs font-mono text-cyan-300">
-                Action Required: {item.proposed_action || 'Review and determine resolution.'}
-              </div>
-
-              <div className="flex items-center justify-between pt-2 border-t border-slate-800 text-xs">
-                <span className="text-slate-500 font-mono">
-                  {new Date(item.created_at).toLocaleTimeString()}
+              <div className="review-card-top">
+                <span className={`status-pill ${item.origin === 'benchmark' ? 'status-warning' : 'status-neutral'}`}>
+                  {item.origin === 'benchmark'
+                    ? 'Benchmark history'
+                    : item.origin === 'legacy_unclassified'
+                      ? 'Legacy · unclassified'
+                      : 'Operational'}
                 </span>
+              </div>
+              <details className="review-origin-evidence">
+                <summary>Origin evidence</summary>
+                <p>{item.origin_evidence}</p>
+              </details>
+              <h3>{item.title}</h3>
+              <p>{item.summary}</p>
+              {item.proposed_action && <div className="review-action">{item.proposed_action}</div>}
+              <div className="review-card-footer">
+                <span>{new Date(item.created_at).toLocaleString()}</span>
+                <span>{item.reviewer ? `Reviewed by ${item.reviewer}` : item.status}</span>
+              </div>
+              {item.status === 'pending' && item.origin !== 'benchmark' && (
                 <button
-                  onClick={() => setSelectedItem(item)}
-                  className="btn btn-secondary py-1 px-3 text-xs"
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setSelectedItem(item);
+                    setExpertNotes('');
+                  }}
+                  disabled={!reviewAllowed}
                 >
-                  Review Decision
+                  Review item
                 </button>
-              </div>
-            </div>
+              )}
+            </article>
           ))}
         </div>
-      </div>
+      </section>
 
-      {/* Work Instructions Section */}
-      <div className="card space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+      <section className="panel">
+        <div className="panel-heading">
           <div>
-            <h3 className="font-bold text-white text-base">Shop Floor Work Instructions</h3>
-            <p className="text-xs text-slate-400">
-              Generated from approved documentation only. Strictly remains unpublished until approved.
-            </p>
+            <p className="eyebrow">Source-backed drafts</p>
+            <h2>Work instructions ({instructions.length})</h2>
           </div>
-          <span className="badge badge-approved text-xs">DEMO-CNC-01 Compliant</span>
         </div>
-
-        <div className="space-y-4">
-          {instructions.length === 0 ? (
-            <div className="text-center py-6 text-slate-500 text-xs">
-              No work instructions drafted yet. Click 'Draft New Work Instruction' to generate one from approved SOPs.
-            </div>
-          ) : (
-            instructions.map((wi) => (
-              <div key={wi.id} className="p-4 bg-slate-900 border border-slate-800 rounded space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-bold text-cyan-400 text-xs">{wi.instruction_number}</span>
-                    <span className="font-bold text-white text-sm">{wi.title}</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`badge ${wi.is_published ? 'badge-approved' : 'badge-draft'}`}>
-                      {wi.is_published ? '✓ PUBLISHED' : '⚠️ UNPUBLISHED DRAFT'}
-                    </span>
-                    {!wi.is_published && (
-                      <button
-                        onClick={() => handleApproveInstruction(wi.id)}
-                        className="btn btn-primary py-1 px-3 text-xs"
-                      >
-                        Approve & Publish
-                      </button>
-                    )}
-                  </div>
+        {instructions.length === 0 && !loading && <div className="empty-state">No work-instruction drafts exist for this machine.</div>}
+        <div className="instruction-list">
+          {instructions.map((instruction) => (
+            <article className="instruction-card" key={instruction.id}>
+              <div className="instruction-heading">
+                <div>
+                  <p className="eyebrow">{instruction.instruction_number} · {instruction.machine_model}</p>
+                  <h3>{instruction.title}</h3>
                 </div>
-
-                <p className="text-xs text-slate-300">{wi.task_summary}</p>
-
-                {/* Steps */}
-                <div className="space-y-2 pt-2 border-t border-slate-800">
-                  <span className="text-xs text-slate-400 font-semibold uppercase">Operational Steps:</span>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {wi.steps.map((st) => (
-                      <div key={st.step_number} className="p-2.5 bg-slate-950 rounded border border-slate-800 text-xs space-y-1">
-                        <div className="font-bold text-cyan-300 font-mono">Step {st.step_number}: {st.title}</div>
-                        <div className="text-slate-300">{st.description}</div>
-                        {st.safety_hazard && (
-                          <div className="text-amber-400 text-[11px]">⚠️ Hazard: {st.safety_hazard}</div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                <span className={`status-pill ${instruction.is_published ? 'status-positive' : 'status-warning'}`}>
+                  {instruction.is_published ? 'Published' : 'Unpublished draft'}
+                </span>
               </div>
-            ))
-          )}
+              <p>{instruction.task_summary}</p>
+              {instruction.safety_warnings.map((warning) => (
+                <div className="notice notice-warning" key={warning}>{warning}</div>
+              ))}
+              <div className="instruction-steps">
+                {instruction.steps.map((step) => (
+                  <article className="chunk-card" key={step.step_number}>
+                    <strong>{step.step_number}. {step.title}</strong>
+                    <p>{step.description}</p>
+                    {step.source_citation && <small>Source: {step.source_citation}</small>}
+                    {step.verification_check && <small>Review check: {step.verification_check}</small>}
+                  </article>
+                ))}
+              </div>
+              <div className="instruction-footer">
+                <span>{instruction.approved_source_doc_ids.length} cited source document(s)</span>
+                {instruction.is_published ? (
+                  <span>Reviewed by {instruction.reviewed_by || 'Reviewer unavailable'}</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => void handleApproveInstruction(instruction)}
+                    disabled={!instructionApproverAllowed}
+                  >
+                    Approve and publish
+                  </button>
+                )}
+              </div>
+            </article>
+          ))}
         </div>
-      </div>
+      </section>
 
-      {/* Decision Modal */}
       {selectedItem && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="card w-full max-w-lg space-y-4 border-slate-700">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-white text-base">Expert Review Sign-off</h3>
-              <button onClick={() => setSelectedItem(null)} className="text-slate-400 hover:text-white">✕</button>
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="review-title">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Review decision</p>
+                <h2 id="review-title">{selectedItem.title}</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setSelectedItem(null)} disabled={acting} aria-label="Close review dialog">×</button>
             </div>
-
-            <div>
-              <div className="text-xs text-slate-400">Review Item:</div>
-              <div className="font-bold text-white text-sm">{selectedItem.title}</div>
-              <p className="text-xs text-slate-300 mt-1">{selectedItem.summary}</p>
+            <p>{selectedItem.summary}</p>
+            <label className="form-field">
+              <span>Reviewer rationale (required)</span>
+              <textarea value={expertNotes} onChange={(event) => setExpertNotes(event.target.value)} minLength={3} rows={4} />
+            </label>
+            <div className="form-actions">
+              <button type="button" className="btn btn-danger" onClick={() => void handleAction('rejected')} disabled={acting || !reviewAllowed || expertNotes.trim().length < 3}>Reject</button>
+              <button type="button" className="btn btn-secondary" onClick={() => void handleAction('escalated')} disabled={acting || !reviewAllowed || expertNotes.trim().length < 3}>Escalate</button>
+              <button type="button" className="btn btn-primary" onClick={() => void handleAction('approved')} disabled={acting || !reviewAllowed || expertNotes.trim().length < 3}>Approve review item</button>
             </div>
-
-            <div className="space-y-1 text-xs">
-              <label className="block text-slate-400">Expert Reviewer Notes & Directives*</label>
-              <textarea
-                value={expertNotes}
-                onChange={(e) => setExpertNotes(e.target.value)}
-                placeholder="e.g. Verified procedure with safety guidelines. Authorized execution under supervisor supervision."
-                className="input-field h-24"
-              />
-            </div>
-
-            <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
-              <button
-                onClick={() => handleAction('rejected')}
-                disabled={acting}
-                className="btn btn-danger text-xs"
-              >
-                Reject & Flag Hazard
-              </button>
-              <button
-                onClick={() => handleAction('approved')}
-                disabled={acting}
-                className="btn btn-primary text-xs"
-              >
-                Approve & Sign-off
-              </button>
-            </div>
-          </div>
+          </section>
         </div>
       )}
 
-      {/* Draft Instruction Modal */}
       {showDraftModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="card w-full max-w-lg space-y-4 border-slate-700">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-white text-base">Draft Shop Floor Work Instruction</h3>
-              <button onClick={() => setShowDraftModal(false)} className="text-slate-400 hover:text-white">✕</button>
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="draft-title">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Evidence-based drafting</p>
+                <h2 id="draft-title">Create a work-instruction draft</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setShowDraftModal(false)} disabled={drafting} aria-label="Close draft dialog">×</button>
             </div>
-
-            <form onSubmit={handleDraftInstruction} className="space-y-3 text-xs">
-              <div>
-                <label className="block text-slate-400 mb-1">Instruction Title*</label>
-                <input
-                  type="text"
-                  value={wiTitle}
-                  onChange={(e) => setWiTitle(e.target.value)}
-                  placeholder="e.g. Spindle Warm-up & Workpiece Chuck Setup"
-                  className="input-field"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-400 mb-1">Target Operation</label>
-                <input
-                  type="text"
-                  value={wiOperation}
-                  onChange={(e) => setWiOperation(e.target.value)}
-                  placeholder="e.g. Shift Startup Calibration"
-                  className="input-field"
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-400 mb-1">Task Summary & Operational Context*</label>
-                <textarea
-                  value={wiSummary}
-                  onChange={(e) => setWiSummary(e.target.value)}
-                  placeholder="Specify machine warm-up parameters, clamp pressures, and safety precautions..."
-                  className="input-field h-24"
-                  required
-                />
-              </div>
-
-              <div className="p-2.5 bg-slate-950 border border-slate-800 rounded text-slate-400 text-[11px]">
-                ℹ️ Draft instructions derive solely from approved documents and will be placed in the Expert Review Queue before publication.
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-                <button type="button" onClick={() => setShowDraftModal(false)} className="btn btn-secondary">
-                  Cancel
-                </button>
-                <button type="submit" disabled={drafting} className="btn btn-primary">
-                  {drafting ? 'Synthesizing...' : 'Generate Draft Instruction'}
+            <div className="notice notice-warning">
+              Drafts contain retrieved approved source excerpts, not generated operating steps. A qualified reviewer must validate and approve before publication.
+            </div>
+            <form onSubmit={(event) => void handleDraftInstruction(event)} className="form-grid">
+              <label className="form-field form-span">
+                <span>Draft title</span>
+                <input value={wiTitle} onChange={(event) => setWiTitle(event.target.value)} minLength={5} maxLength={200} required />
+              </label>
+              <label className="form-field form-span">
+                <span>Target operation</span>
+                <input value={wiOperation} onChange={(event) => setWiOperation(event.target.value)} required />
+              </label>
+              <label className="form-field form-span">
+                <span>Task description for evidence retrieval</span>
+                <textarea value={wiSummary} onChange={(event) => setWiSummary(event.target.value)} minLength={10} rows={4} required />
+              </label>
+              <div className="form-actions form-span">
+                <button type="button" className="btn btn-secondary" onClick={() => setShowDraftModal(false)} disabled={drafting}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={drafting}>
+                  {drafting ? 'Checking approved evidence…' : 'Create draft'}
                 </button>
               </div>
             </form>
-          </div>
+          </section>
         </div>
       )}
     </div>

@@ -1,237 +1,316 @@
-import React, { useEffect, useState } from 'react';
-import { api } from '../services/api';
-import { DocumentConflict } from '../types';
+import React, { FormEvent, useEffect, useState } from 'react';
+import { useAuth } from '../auth/AuthContext';
+import { api, ApiError } from '../services/api';
+import { DocumentConflict, RevisionRecord } from '../types';
 
-export const ConflictCenterPage: React.FC = () => {
+interface ConflictCenterPageProps {
+  machineModel: string;
+}
+
+type ResolutionAction = 'approve_exception' | 'mark_superseded' | 'withdraw_conflicting';
+
+export const ConflictCenterPage: React.FC<ConflictCenterPageProps> = ({ machineModel }) => {
+  const { can, status: authStatus } = useAuth();
   const [conflicts, setConflicts] = useState<DocumentConflict[]>([]);
-  const [matrix, setMatrix] = useState<any[]>([]);
+  const [matrix, setMatrix] = useState<RevisionRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedConflict, setSelectedConflict] = useState<DocumentConflict | null>(null);
+  const [winnerId, setWinnerId] = useState('');
+  const [resolutionAction, setResolutionAction] = useState<ResolutionAction>('approve_exception');
   const [resolutionNotes, setResolutionNotes] = useState('');
   const [resolving, setResolving] = useState(false);
+  const [success, setSuccess] = useState<string | null>(null);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    let active = true;
+    setLoading(true);
+    Promise.all([api.getConflicts(machineModel), api.getRevisionMatrix()])
+      .then(([conflictData, matrixData]) => {
+        if (!active) return;
+        setConflicts(conflictData);
+        setMatrix(matrixData.filter((row) => row.machine_model === machineModel || row.machine_model === 'ALL'));
+        setError(null);
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setError(reason instanceof ApiError ? reason.message : 'Conflict and revision data could not be loaded.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [machineModel]);
 
-  const loadData = async () => {
+  const refresh = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      const [confData, matData] = await Promise.all([
-        api.getConflicts(),
+      const [conflictData, matrixData] = await Promise.all([
+        api.getConflicts(machineModel),
         api.getRevisionMatrix(),
       ]);
-      setConflicts(confData || []);
-      setMatrix(matData || []);
-    } catch (e: any) {
-      console.error(e);
+      setConflicts(conflictData);
+      setMatrix(matrixData.filter((row) => row.machine_model === machineModel || row.machine_model === 'ALL'));
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : 'Conflict data could not be refreshed.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleResolve = async (action: string) => {
-    if (!selectedConflict) return;
+  const openResolution = (conflict: DocumentConflict) => {
+    setSelectedConflict(conflict);
+    setWinnerId(conflict.document_b_id);
+    setResolutionAction('approve_exception');
+    setResolutionNotes('');
+    setSuccess(null);
+  };
+
+  const handleResolve = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!selectedConflict || !winnerId || resolutionNotes.trim().length < 3) return;
+    if (resolutionAction !== 'approve_exception' && !can('document_approver')) {
+      setError('This disposition also requires the document_approver role.');
+      return;
+    }
+    const actionLabel = resolutionAction === 'approve_exception'
+      ? 'record this approved exception'
+      : resolutionAction === 'mark_superseded'
+        ? 'mark the non-winning document superseded'
+        : 'withdraw the non-winning document';
+    if (!window.confirm(`Confirm: ${actionLabel}? This changes how the conflict is governed.`)) return;
+
+    setResolving(true);
+    setError(null);
     try {
-      setResolving(true);
-      await api.resolveConflict(selectedConflict.conflict_id, action, resolutionNotes || 'Resolved per Quality Engineering override.');
-      alert('Conflict resolution logged in audit ledger.');
+      const result = await api.resolveConflict(
+        selectedConflict.conflict_id,
+        winnerId,
+        resolutionAction,
+        resolutionNotes.trim(),
+      );
+      setSuccess(`Resolution recorded for ${result.conflict_id}. Future answers will use the selected governing source.`);
       setSelectedConflict(null);
-      setResolutionNotes('');
-      await loadData();
-    } catch (e: any) {
-      alert(`Resolution error: ${e.message}`);
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : 'Conflict resolution could not be recorded.');
     } finally {
       setResolving(false);
     }
   };
 
+  const openConflicts = conflicts.filter((conflict) => conflict.status !== 'resolved');
+  const resolvedConflicts = conflicts.filter((conflict) => conflict.status === 'resolved');
   return (
-    <div className="page-container space-y-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+    <div className="page-container">
+      <section className="page-heading">
         <div>
-          <h2 className="text-xl font-bold text-white flex items-center gap-2">
-            <span>⚖️ Revision & Parameter Conflict Center</span>
-            <span className="badge badge-superseded text-xs">Human Verification Mandatory</span>
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            Detects contradictory operational directives between approved SOPs and active Quality Alerts.
-          </p>
+          <p className="eyebrow">Revision governance</p>
+          <h1>Conflicts &amp; authority</h1>
+          <p className="page-description">Compare active source instructions and review document authority for {machineModel}.</p>
         </div>
-
-        <button onClick={loadData} className="btn btn-secondary text-xs">
-          🔄 Scan for Conflicts
+        <button type="button" className="btn btn-secondary" onClick={() => void refresh()} disabled={loading}>
+          {loading ? 'Refreshing…' : 'Refresh records'}
         </button>
-      </div>
+      </section>
 
-      {/* Detected Conflicts Section */}
-      <div className="space-y-4">
-        <h3 className="text-xs font-semibold uppercase text-slate-400 tracking-wider">
-          Detected Technical Conflicts ({conflicts.length})
-        </h3>
+      {error && <div className="notice notice-error" role="alert">{error}</div>}
+      {success && <div className="notice notice-success" role="status">{success}</div>}
+      {!can('conflict_resolver') && (
+        <div className="notice notice-neutral">
+          Conflict resolutions require a verified <code>conflict_resolver</code> role.
+          {authStatus === 'unconfigured' && ' OIDC sign-in is not configured.'}
+        </div>
+      )}
 
-        {conflicts.length === 0 && !loading && (
-          <div className="card text-center py-8 text-emerald-400 text-xs">
-            ✓ No unresolved operational contradictions detected across approved documents.
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Human disposition required</p>
+            <h2>Active conflicts <span className="count-badge">{openConflicts.length}</span></h2>
           </div>
+        </div>
+        {loading ? <div className="loading-state">Loading conflict scan…</div> : null}
+        {!loading && openConflicts.length === 0 && (
+          <div className="empty-state">No unresolved conflicts were detected for this machine scope.</div>
         )}
-
-        {conflicts.map((conf) => (
-          <div key={conf.conflict_id} className="card border-amber-600/50 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-              <div className="flex items-center gap-2">
-                <span className="badge bg-amber-900/40 text-amber-300 border border-amber-700">
-                  {conf.severity.toUpperCase()} PRIORITY
-                </span>
-                <span className="font-bold text-white text-sm">{conf.parameter_or_topic} Discrepancy</span>
-              </div>
-              <span className="font-mono text-xs text-slate-400">{conf.conflict_id}</span>
-            </div>
-
-            <p className="text-xs text-slate-300">{conf.description}</p>
-
-            {/* Side-by-Side Comparison */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Document A */}
-              <div className="p-3 bg-slate-900/80 border border-slate-800 rounded space-y-2">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="font-mono font-bold text-cyan-400">
-                    {conf.document_a_number} ({conf.document_a_revision})
+        <div className="conflict-list">
+          {openConflicts.map((conflict) => (
+            <article className="conflict-card" key={conflict.conflict_id}>
+              <div className="conflict-header">
+                <div>
+                  <span className={`status-pill ${conflict.severity === 'critical' ? 'status-negative' : 'status-warning'}`}>
+                    {conflict.severity} severity
                   </span>
-                  <span className="badge badge-approved text-[10px]">{conf.document_a_status}</span>
+                  <h3>{conflict.parameter_or_topic}</h3>
                 </div>
-                <div className="text-xs text-slate-200 font-mono bg-slate-950 p-2 rounded">
-                  "{conf.instruction_a}"
-                </div>
+                <code>{conflict.conflict_id}</code>
               </div>
-
-              {/* Document B */}
-              <div className="p-3 bg-slate-900/80 border border-amber-900/50 rounded space-y-2">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="font-mono font-bold text-amber-400">
-                    {conf.document_b_number} ({conf.document_b_revision})
-                  </span>
-                  <span className="badge badge-approved text-[10px]">{conf.document_b_status}</span>
-                </div>
-                <div className="text-xs text-slate-200 font-mono bg-slate-950 p-2 rounded">
-                  "{conf.instruction_b}"
-                </div>
+              <p className="conflict-description">{conflict.description}</p>
+              <div className="conflict-comparison">
+                <SourceCard
+                  label="Source A"
+                  document={conflict.document_a_number}
+                  revision={conflict.document_a_revision}
+                  status={conflict.document_a_status}
+                  instruction={conflict.instruction_a}
+                />
+                <SourceCard
+                  label="Source B"
+                  document={conflict.document_b_number}
+                  revision={conflict.document_b_revision}
+                  status={conflict.document_b_status}
+                  instruction={conflict.instruction_b}
+                />
               </div>
-            </div>
+              <div className="conflict-footer">
+                <p>{conflict.recommended_action}</p>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => openResolution(conflict)}
+                  disabled={!can('conflict_resolver')}
+                >
+                  Review resolution
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
 
-            <div className="flex items-center justify-between pt-2 border-t border-slate-800 text-xs">
-              <span className="text-slate-400 italic">{conf.recommended_action}</span>
-              <button
-                onClick={() => setSelectedConflict(conf)}
-                className="btn btn-primary py-1 px-3 text-xs"
-              >
-                Resolve Discrepancy
-              </button>
+      {resolvedConflicts.length > 0 && (
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Recorded decisions</p>
+              <h2>Resolved conflicts ({resolvedConflicts.length})</h2>
             </div>
           </div>
-        ))}
-      </div>
+          <div className="activity-list">
+            {resolvedConflicts.map((conflict) => (
+              <article className="activity-item" key={conflict.conflict_id}>
+                <div className="activity-main">
+                  <strong>{conflict.parameter_or_topic}</strong>
+                  <span>{conflict.resolution_action?.replace(/_/g, ' ') || 'Resolved'}</span>
+                </div>
+                <div className="activity-meta">
+                  <span>Governing document: {conflict.winning_document_id === conflict.document_a_id ? conflict.document_a_number : conflict.document_b_number}</span>
+                  <span>{conflict.resolved_by || 'Resolver unavailable'}</span>
+                </div>
+                {conflict.resolution_notes && <p>{conflict.resolution_notes}</p>}
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
-      {/* Revision Authority Matrix */}
-      <div className="card space-y-4">
-        <h3 className="text-xs font-semibold uppercase text-slate-400 tracking-wider">
-          Revision Family Tree & Explicit Authority Matrix
-        </h3>
-
-        <div className="overflow-x-auto">
+      <section className="panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">Revision register</p>
+            <h2>Document authority</h2>
+          </div>
+        </div>
+        <div className="table-wrap">
           <table>
             <thead>
-              <tr>
-                <th>Document</th>
-                <th>Revision</th>
-                <th>Title</th>
-                <th>Explicit Status</th>
-                <th>Authority Status</th>
-                <th>Effective Range</th>
-                <th>Superseded Link</th>
-              </tr>
+              <tr><th>Document</th><th>Revision</th><th>Status</th><th>Authority</th><th>Effective</th><th>Expires</th><th>Superseded by</th></tr>
             </thead>
             <tbody>
-              {matrix.map((row) => (
+              {loading ? (
+                <tr><td colSpan={7} className="table-state">Loading revision register…</td></tr>
+              ) : matrix.length === 0 ? (
+                <tr><td colSpan={7} className="table-state">No revision records found for this machine.</td></tr>
+              ) : matrix.map((row) => (
                 <tr key={row.id}>
-                  <td className="font-mono font-bold text-cyan-400 text-xs">{row.document_number}</td>
-                  <td className="font-mono text-xs">{row.revision}</td>
-                  <td className="text-white text-xs">{row.title}</td>
-                  <td>
-                    <span className={`badge ${
-                      row.approval_status === 'Approved' ? 'badge-approved' :
-                      row.approval_status === 'Superseded' ? 'badge-superseded' : 'badge-draft'
-                    }`}>
-                      {row.approval_status}
-                    </span>
-                  </td>
-                  <td>
-                    <span className={row.is_authoritative ? 'text-emerald-400 font-semibold text-xs' : 'text-red-400 font-semibold text-xs'}>
-                      {row.is_authoritative ? '✓ Authoritative' : '✗ Non-Authoritative'}
-                    </span>
-                  </td>
-                  <td className="font-mono text-xs text-slate-400">
-                    {row.effective_date ? new Date(row.effective_date).toLocaleDateString() : 'N/A'}
-                  </td>
-                  <td className="font-mono text-xs text-slate-400 truncate max-w-xs">
-                    {row.superseded_by_id ? `Superseded by ID ${row.superseded_by_id.slice(0, 8)}...` : 'None'}
-                  </td>
+                  <td><strong>{row.document_number}</strong><small className="table-subtitle">{row.title}</small></td>
+                  <td>{row.revision}</td>
+                  <td><span className="status-pill status-neutral">{row.approval_status}</span></td>
+                  <td title={row.authority_reason}>{row.is_authoritative ? 'Authoritative' : row.authority_reason}</td>
+                  <td>{row.effective_date ? new Date(row.effective_date).toLocaleDateString() : 'Not specified'}</td>
+                  <td>{row.expiry_date ? new Date(row.expiry_date).toLocaleDateString() : 'Not specified'}</td>
+                  <td>{row.superseded_by_id ? matrix.find((document) => document.id === row.superseded_by_id)?.document_number || row.superseded_by_id.slice(0, 8) : '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      </div>
+      </section>
 
-      {/* Resolution Modal */}
       {selectedConflict && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="card w-full max-w-lg space-y-4 border-slate-700">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-white text-base">Authorize Conflict Resolution</h3>
-              <button onClick={() => setSelectedConflict(null)} className="text-slate-400 hover:text-white">✕</button>
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="resolve-title">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Authorized action</p>
+                <h2 id="resolve-title">Resolve {selectedConflict.parameter_or_topic}</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setSelectedConflict(null)} disabled={resolving} aria-label="Close resolution dialog">×</button>
             </div>
-
-            <p className="text-xs text-slate-300">
-              Select the governing operational directive for <strong>{selectedConflict.parameter_or_topic}</strong>:
-            </p>
-
-            <div className="space-y-2 text-xs">
-              <label className="block text-slate-400">Resolution Engineering Notes*</label>
-              <textarea
-                value={resolutionNotes}
-                onChange={(e) => setResolutionNotes(e.target.value)}
-                placeholder="e.g. Enforce QA-CNC-2024-03 restriction of 1200 mm/min on Ti-6Al-4V until tool fixture redesign is released."
-                className="input-field h-24"
-              />
-            </div>
-
-            <div className="flex flex-col gap-2 pt-2 border-t border-slate-800">
-              <button
-                onClick={() => handleResolve('enforce_quality_alert')}
-                disabled={resolving}
-                className="btn btn-primary text-xs w-full"
-              >
-                Enforce Quality Alert ({selectedConflict.document_b_number}) Limit
-              </button>
-              <button
-                onClick={() => handleResolve('retain_base_sop')}
-                disabled={resolving}
-                className="btn btn-secondary text-xs w-full"
-              >
-                Approve Base SOP Standard Parameter
-              </button>
-              <button
-                onClick={() => setSelectedConflict(null)}
-                className="btn btn-secondary text-xs w-full mt-1"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
+            <form className="form-grid" onSubmit={(event) => void handleResolve(event)}>
+              <label className="form-field form-span">
+                <span>Governing source</span>
+                <select value={winnerId} onChange={(event) => setWinnerId(event.target.value)} required>
+                  <option value={selectedConflict.document_a_id}>{selectedConflict.document_a_number} · {selectedConflict.document_a_revision}</option>
+                  <option value={selectedConflict.document_b_id}>{selectedConflict.document_b_number} · {selectedConflict.document_b_revision}</option>
+                </select>
+              </label>
+              <label className="form-field form-span">
+                <span>Disposition</span>
+                <select value={resolutionAction} onChange={(event) => setResolutionAction(event.target.value as ResolutionAction)}>
+                  <option value="approve_exception">Record a scoped governing-source exception</option>
+                  {can('document_approver') && (
+                    <>
+                      <option value="mark_superseded">Mark the other document superseded</option>
+                      <option value="withdraw_conflicting">Withdraw the other document</option>
+                    </>
+                  )}
+                </select>
+              </label>
+              {resolutionAction !== 'approve_exception' && (
+                <div className="notice notice-warning form-span">
+                  This changes the status of the entire losing document, not only this parameter. Use only when the full document is no longer valid.
+                </div>
+              )}
+              {!can('document_approver') && resolutionAction !== 'approve_exception' && (
+                <div className="notice notice-neutral form-span">This disposition also requires the document_approver role.</div>
+              )}
+              <label className="form-field form-span">
+                <span>Resolution rationale</span>
+                <textarea value={resolutionNotes} onChange={(event) => setResolutionNotes(event.target.value)} minLength={3} maxLength={4000} required rows={4} />
+              </label>
+              {error && <div className="notice notice-error form-span" role="alert">{error}</div>}
+              <div className="form-actions form-span">
+                <button type="button" className="btn btn-secondary" onClick={() => setSelectedConflict(null)} disabled={resolving}>Cancel</button>
+                <button type="submit" className="btn btn-primary" disabled={resolving || !can('conflict_resolver') || (resolutionAction !== 'approve_exception' && !can('document_approver'))}>
+                  {resolving ? 'Recording…' : 'Confirm resolution'}
+                </button>
+              </div>
+            </form>
+          </section>
         </div>
       )}
     </div>
   );
 };
+
+const SourceCard: React.FC<{
+  label: string;
+  document: string;
+  revision: string;
+  status: string;
+  instruction: string;
+}> = ({ label, document, revision, status, instruction }) => (
+  <div className="source-card">
+    <div className="source-card-heading">
+      <span>{label}</span>
+      <span className="status-pill status-neutral">{status}</span>
+    </div>
+    <strong>{document} · {revision}</strong>
+    <blockquote>{instruction}</blockquote>
+  </div>
+);

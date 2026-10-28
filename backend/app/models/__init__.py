@@ -3,6 +3,7 @@ from .chunk import DocumentChunk
 from .audit import AuditLog
 from .review import ReviewItem
 from .instruction import DraftWorkInstruction
+from .conflict_resolution import ConflictResolution
 
 __all__ = [
     "Document",
@@ -10,4 +11,5 @@ __all__ = [
     "AuditLog",
     "ReviewItem",
     "DraftWorkInstruction",
+    "ConflictResolution",
 ]

@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
+import { AuthProvider, useAuth } from './auth/AuthContext';
 import { Navbar, NavTab } from './components/Navbar';
 import { OverviewPage } from './pages/OverviewPage';
 import { AssistantPage } from './pages/AssistantPage';
@@ -8,78 +9,143 @@ import { ConflictCenterPage } from './pages/ConflictCenterPage';
 import { ReviewQueuePage } from './pages/ReviewQueuePage';
 import { EvaluationPage } from './pages/EvaluationPage';
 import { api } from './services/api';
+import { SystemHealth } from './types';
 
-export const App: React.FC = () => {
+const ApplicationShell: React.FC = () => {
+  const { status: authStatus } = useAuth();
   const [currentTab, setCurrentTab] = useState<NavTab>('overview');
-  const [pendingReviewsCount, setPendingReviewsCount] = useState(0);
-  const [conflictsCount, setConflictsCount] = useState(0);
+  const [pendingReviewsCount, setPendingReviewsCount] = useState<number | null>(null);
+  const [conflictsCount, setConflictsCount] = useState<number | null>(null);
+  const [machineModels, setMachineModels] = useState<string[]>([]);
+  const [machineModel, setMachineModel] = useState('DEMO-CNC-01');
+  const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
 
   useEffect(() => {
-    loadBadgeCounts();
-  }, [currentTab]);
+    api.getHealth()
+      .then((data) => {
+        setHealth(data);
+        setHealthError(null);
+      })
+      .catch(() => {
+        setHealth(null);
+        setHealthError('Unable to reach the backend health endpoint.');
+      });
 
-  const loadBadgeCounts = async () => {
-    try {
-      const [reviewData, conflictData] = await Promise.all([
-        api.getReviewQueue('pending').catch(() => []),
-        api.getConflicts().catch(() => []),
-      ]);
-      setPendingReviewsCount(reviewData.length || 0);
-      setConflictsCount(conflictData.length || 0);
-    } catch (e) {
-      // ignore
-    }
-  };
+    api.getMachineModels()
+      .then((models) => {
+        setMachineModels(models);
+        setMachineModel((current) => (
+          models.includes(current) ? current : models[0] || current
+        ));
+      })
+      .catch(() => setMachineModels([]));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    Promise.allSettled([
+      api.getReviewQueue('pending'),
+      api.getConflicts(machineModel),
+    ]).then(([reviews, conflicts]) => {
+      if (!active) return;
+      setPendingReviewsCount(reviews.status === 'fulfilled' ? reviews.value.length : null);
+      setConflictsCount(
+        conflicts.status === 'fulfilled'
+          ? conflicts.value.filter((conflict) => conflict.status !== 'resolved').length
+          : null,
+      );
+    });
+    return () => {
+      active = false;
+    };
+  }, [machineModel, currentTab]);
+
+  const demoMode = health?.demo_mode === true;
 
   return (
     <div className="app-container">
-      {/* Sidebar Navigation */}
       <Navbar
         currentTab={currentTab}
         onSelectTab={setCurrentTab}
         pendingReviewsCount={pendingReviewsCount}
         conflictsCount={conflictsCount}
+        machineModels={machineModels}
+        machineModel={machineModel}
+        onSelectMachine={setMachineModel}
+        health={health}
+        healthError={healthError}
       />
 
-      {/* Main Content Area */}
       <div className="main-content">
-        {/* Prominent Safety & Demo Disclaimer Banner */}
-        <div className="disclaimer-banner">
-          ⚠️ SYNTHETIC DEMONSTRATION DATA. NOT VALID FOR REAL MACHINE OPERATION.
+        <div className={`disclaimer-banner ${demoMode ? 'demo-banner' : 'operations-banner'}`} role="note">
+          {demoMode
+            ? 'Synthetic demonstration data — not valid for real machine operation.'
+            : 'Use only current, site-approved documentation. Verify procedures at the machine before operation.'}
         </div>
 
-        {/* Top Header Bar */}
         <header className="top-bar">
-          <div className="flex items-center gap-3">
-            <span className="font-bold text-white text-sm tracking-wide">DEMO-CNC-01</span>
-            <span className="text-slate-500 font-mono text-xs">|</span>
-            <span className="badge badge-approved text-xs">REVISION AWARE</span>
-            <span className="text-xs text-slate-400 font-mono hidden md:inline">
-              Authority Enforced by Status & Effective Date
-            </span>
+          <div className="top-bar-identity">
+            <div className="top-bar-title">{machineModel}</div>
+            <div className="top-bar-meta">
+              {health?.environment || (healthError ? 'Backend unavailable' : 'Checking backend')}
+            </div>
           </div>
-
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <span className="text-slate-400">LLM Mode:</span>
-            <span className="text-cyan-400 font-semibold bg-slate-900 border border-slate-700 px-2 py-0.5 rounded">
-              Deterministic Demo
+          <div className="provider-status">
+            <span className="top-bar-label">Answer provider</span>
+            <strong>
+              {health
+                ? health.llm_provider.replace(/_/g, ' ')
+                : healthError
+                  ? 'Unavailable'
+                  : 'Checking'}
+            </strong>
+          </div>
+          <div
+            className={`top-bar-auth ${
+              authStatus === 'authenticated'
+                ? 'is-configured'
+                : authStatus === 'error'
+                  ? 'is-error'
+                  : 'is-unavailable'
+            }`}
+            role="status"
+          >
+            <span className={`status-dot ${authStatus === 'authenticated' ? 'is-healthy' : 'is-unavailable'}`} />
+            <span>
+              {authStatus === 'authenticated'
+                ? 'Identity verified'
+                : authStatus === 'signed_out'
+                  ? 'Sign in required'
+                  : authStatus === 'unconfigured'
+                    ? 'OIDC not configured'
+                    : authStatus === 'error'
+                      ? 'Identity verification failed'
+                      : 'Checking identity'}
             </span>
           </div>
         </header>
 
-        {/* Dynamic Page Views */}
-        <main className="flex-1 overflow-y-auto">
-          {currentTab === 'overview' && <OverviewPage onNavigate={setCurrentTab} />}
-          {currentTab === 'assistant' && <AssistantPage />}
-          {currentTab === 'library' && <DocumentLibraryPage />}
-          {currentTab === 'evidence' && <EvidenceExplorerPage />}
-          {currentTab === 'conflicts' && <ConflictCenterPage />}
-          {currentTab === 'review' && <ReviewQueuePage />}
+        <main className="main-area" id="main-content" tabIndex={-1}>
+          {currentTab === 'overview' && (
+            <OverviewPage machineModel={machineModel} onNavigate={setCurrentTab} />
+          )}
+          {currentTab === 'assistant' && <AssistantPage machineModel={machineModel} />}
+          {currentTab === 'library' && <DocumentLibraryPage machineModel={machineModel} health={health} />}
+          {currentTab === 'evidence' && <EvidenceExplorerPage machineModel={machineModel} />}
+          {currentTab === 'conflicts' && <ConflictCenterPage machineModel={machineModel} />}
+          {currentTab === 'review' && <ReviewQueuePage machineModel={machineModel} />}
           {currentTab === 'evaluation' && <EvaluationPage />}
         </main>
       </div>
     </div>
   );
 };
+
+export const App: React.FC = () => (
+  <AuthProvider>
+    <ApplicationShell />
+  </AuthProvider>
+);
 
 export default App;

@@ -1,248 +1,173 @@
 import React, { useState } from 'react';
-import { api } from '../services/api';
+import { api, ApiError } from '../services/api';
 import { EvaluationResponse } from '../types';
+
+interface DatasetCase {
+  id?: string;
+  category?: string;
+  query?: string;
+  expected_docs?: string[];
+  should_abstain?: boolean;
+  expected_abstention_reason?: string;
+  is_safety_critical?: boolean;
+}
+
+const metricLabels: Record<string, string> = {
+  recall_at_1: 'Recall @ 1',
+  recall_at_3: 'Recall @ 3',
+  recall_at_5: 'Recall @ 5',
+  citation_validity_precision: 'Citation validity precision',
+  abstention_accuracy: 'Abstention accuracy',
+  safety_escalation_compliance: 'Safety escalation compliance',
+  conflict_detection_rate: 'Conflict detection rate',
+  revision_freshness_rate: 'Revision freshness rate',
+  avg_latency_ms: 'Average latency',
+};
+
+const formatMetric = (key: string, value: number | null | undefined): string => {
+  if (value === null || value === undefined || !Number.isFinite(value)) return 'Not measured';
+  return key === 'avg_latency_ms' ? `${value.toFixed(2)} ms` : `${(value * 100).toFixed(1)}%`;
+};
 
 export const EvaluationPage: React.FC = () => {
   const [evalData, setEvalData] = useState<EvaluationResponse | null>(null);
   const [running, setRunning] = useState(false);
-  const [datasetCases, setDatasetCases] = useState<any[]>([]);
+  const [datasetCases, setDatasetCases] = useState<DatasetCase[]>([]);
   const [showDataset, setShowDataset] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [datasetLoading, setDatasetLoading] = useState(false);
 
   const handleRunEvaluation = async () => {
+    setError(null);
+    setRunning(true);
     try {
-      setRunning(true);
-      const res = await api.runEvaluation();
-      setEvalData(res);
-    } catch (e: any) {
-      alert(`Benchmark error: ${e.message}`);
+      setEvalData(await api.runEvaluation());
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : 'The benchmark run could not be completed.');
     } finally {
       setRunning(false);
     }
   };
 
   const handleLoadDataset = async () => {
+    setError(null);
+    setDatasetLoading(true);
     try {
       const data = await api.getEvaluationDataset();
-      setDatasetCases(data.cases || []);
+      setDatasetCases(data.cases as DatasetCase[]);
       setShowDataset(true);
-    } catch (e: any) {
-      alert(e.message);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : 'The benchmark dataset could not be loaded.');
+    } finally {
+      setDatasetLoading(false);
     }
   };
 
+  const comparison = evalData?.comparison ?? {};
+  const metricKeys = Object.keys(comparison);
+
   return (
-    <div className="page-container space-y-6">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+    <div className="page-container">
+      <section className="page-heading">
         <div>
-          <h2 className="text-xl font-bold text-white flex items-center gap-2">
-            <span>📈 Evaluation & Empirical Benchmarks</span>
-            <span className="badge badge-approved text-xs font-mono">Actual Test Executions</span>
-          </h2>
-          <p className="text-xs text-slate-400 mt-1">
-            Empirical comparison of Baseline Keyword Search (BM25) vs Proposed Hybrid RRF on ground-truth manufacturing queries.
+          <p className="eyebrow">Measured system behavior</p>
+          <h1>Evaluation &amp; benchmarks</h1>
+          <p className="page-description">
+            Run the configured ground-truth suite against the current document registry. Results are generated on request and are not a certification of operational safety.
           </p>
         </div>
-
-        <div className="flex items-center gap-2">
-          <button onClick={handleLoadDataset} className="btn btn-secondary text-xs">
-            📋 View Ground Truth Cases
+        <div className="heading-actions">
+          <button type="button" className="btn btn-secondary" onClick={() => void handleLoadDataset()} disabled={datasetLoading}>
+            {datasetLoading ? 'Loading cases…' : 'View benchmark cases'}
           </button>
-          <button onClick={handleRunEvaluation} disabled={running} className="btn btn-primary text-xs">
-            {running ? 'Executing Benchmark Suite...' : '⚡ Run Live Benchmark'}
+          <button type="button" className="btn btn-primary" onClick={() => void handleRunEvaluation()} disabled={running}>
+            {running ? 'Running benchmark…' : 'Run benchmark'}
           </button>
         </div>
-      </div>
+      </section>
 
-      {/* Main Results Table & Metric Cards */}
+      {error && <div className="notice notice-error" role="alert">{error}</div>}
+      {running && <div className="loading-state" role="status">Evaluating retrieval modes against the configured test dataset…</div>}
+
       {evalData ? (
-        <div className="space-y-6">
-          <div className="flex items-center justify-between p-3 bg-slate-900 border border-slate-800 rounded font-mono text-xs">
-            <span className="text-slate-400">BENCHMARK RUN: <strong className="text-white">{evalData.timestamp}</strong></span>
-            <span className="text-cyan-400">Total Test Queries: {evalData.total_benchmark_queries}</span>
+        <>
+          <div className="benchmark-run-meta">
+            <span>Run timestamp <strong>{evalData.timestamp}</strong></span>
+            <span>Benchmark queries <strong>{evalData.total_benchmark_queries}</strong></span>
           </div>
-
-          {/* Comparative Metrics Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="card text-center space-y-1">
-              <div className="text-[11px] text-slate-400 uppercase font-semibold">Recall@1 (Top Match)</div>
-              <div className="text-2xl font-bold font-mono text-cyan-400">
-                {(evalData.comparison.recall_at_1?.hybrid * 100).toFixed(1)}%
-              </div>
-              <div className="text-[11px] text-slate-400">
-                BM25: {(evalData.comparison.recall_at_1?.bm25 * 100).toFixed(1)}% (Δ {evalData.comparison.recall_at_1?.delta > 0 ? '+' : ''}{(evalData.comparison.recall_at_1?.delta * 100).toFixed(1)}%)
-              </div>
-            </div>
-
-            <div className="card text-center space-y-1">
-              <div className="text-[11px] text-slate-400 uppercase font-semibold">Recall@5 (Passage Pool)</div>
-              <div className="text-2xl font-bold font-mono text-emerald-400">
-                {(evalData.comparison.recall_at_5?.hybrid * 100).toFixed(1)}%
-              </div>
-              <div className="text-[11px] text-slate-400">
-                BM25: {(evalData.comparison.recall_at_5?.bm25 * 100).toFixed(1)}%
+          <section className="metric-grid" aria-label="Measured benchmark metrics">
+            {metricKeys.map((key) => (
+              <article className="metric-card" key={key}>
+                <span className="metric-label">{metricLabels[key] || key.replace(/_/g, ' ')}</span>
+                <strong className="metric-value">{formatMetric(key, comparison[key]?.hybrid)}</strong>
+                <span className="metric-detail">
+                  BM25 {formatMetric(key, comparison[key]?.bm25)}
+                  {' · Δ '}
+                  {formatMetric(key, comparison[key]?.delta)}
+                </span>
+              </article>
+            ))}
+          </section>
+          <section className="panel">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Per-mode comparison</p>
+                <h2>Returned benchmark metrics</h2>
               </div>
             </div>
-
-            <div className="card text-center space-y-1">
-              <div className="text-[11px] text-slate-400 uppercase font-semibold">Citation Precision</div>
-              <div className="text-2xl font-bold font-mono text-cyan-300">
-                {(evalData.comparison.citation_validity_precision?.hybrid * 100).toFixed(1)}%
-              </div>
-              <div className="text-[11px] text-emerald-400 font-mono">100% Verifiable</div>
-            </div>
-
-            <div className="card text-center space-y-1">
-              <div className="text-[11px] text-slate-400 uppercase font-semibold">Abstention Accuracy</div>
-              <div className="text-2xl font-bold font-mono text-amber-400">
-                {(evalData.comparison.abstention_accuracy?.hybrid * 100).toFixed(1)}%
-              </div>
-              <div className="text-[11px] text-slate-400">Zero Hallucinations</div>
-            </div>
-
-            <div className="card text-center space-y-1">
-              <div className="text-[11px] text-slate-400 uppercase font-semibold">Safety Escalation</div>
-              <div className="text-2xl font-bold font-mono text-red-400">
-                {(evalData.comparison.safety_escalation_compliance?.hybrid * 100).toFixed(1)}%
-              </div>
-              <div className="text-[11px] text-red-400/80 font-mono">100% Policy Enforced</div>
-            </div>
-
-            <div className="card text-center space-y-1">
-              <div className="text-[11px] text-slate-400 uppercase font-semibold">Conflict Detection</div>
-              <div className="text-2xl font-bold font-mono text-amber-300">
-                {(evalData.comparison.conflict_detection_rate?.hybrid * 100).toFixed(1)}%
-              </div>
-              <div className="text-[11px] text-slate-400">Parameter Contradictions</div>
-            </div>
-
-            <div className="card text-center space-y-1">
-              <div className="text-[11px] text-slate-400 uppercase font-semibold">Hybrid Latency</div>
-              <div className="text-2xl font-bold font-mono text-white">
-                {evalData.comparison.avg_latency_ms?.hybrid} ms
-              </div>
-              <div className="text-[11px] text-slate-400">Dense Embedding + RRF</div>
-            </div>
-
-            <div className="card text-center space-y-1">
-              <div className="text-[11px] text-slate-400 uppercase font-semibold">BM25 Latency</div>
-              <div className="text-2xl font-bold font-mono text-white">
-                {evalData.comparison.avg_latency_ms?.bm25} ms
-              </div>
-              <div className="text-[11px] text-slate-400">Keyword Inverted Index</div>
-            </div>
-          </div>
-
-          {/* Full Side-by-Side Comparison Table */}
-          <div className="card space-y-3">
-            <h3 className="text-xs font-semibold uppercase text-slate-400 tracking-wider">
-              Empirical Comparison: Baseline BM25 vs Proposed Hybrid RRF
-            </h3>
-            <div className="overflow-x-auto">
+            <div className="table-wrap">
               <table>
-                <thead>
-                  <tr>
-                    <th>Evaluation Metric</th>
-                    <th>BM25 Keyword Baseline</th>
-                    <th>Hybrid RRF (Proposed)</th>
-                    <th>Improvement (Δ)</th>
-                    <th>Engineering Rationale</th>
-                  </tr>
-                </thead>
+                <thead><tr><th>Metric</th><th>BM25 baseline</th><th>Hybrid retrieval</th><th>Difference</th></tr></thead>
                 <tbody>
-                  <tr>
-                    <td className="font-semibold text-white">Recall@1</td>
-                    <td className="font-mono text-amber-300">{(evalData.comparison.recall_at_1?.bm25 * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-emerald-400 font-bold">{(evalData.comparison.recall_at_1?.hybrid * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-cyan-300">{(evalData.comparison.recall_at_1?.delta * 100).toFixed(1)}%</td>
-                    <td className="text-xs text-slate-400">Dense semantics resolve synonym gaps in operational questions</td>
-                  </tr>
-                  <tr>
-                    <td className="font-semibold text-white">Recall@3</td>
-                    <td className="font-mono text-amber-300">{(evalData.comparison.recall_at_3?.bm25 * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-emerald-400 font-bold">{(evalData.comparison.recall_at_3?.hybrid * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-cyan-300">{(evalData.comparison.recall_at_3?.delta * 100).toFixed(1)}%</td>
-                    <td className="text-xs text-slate-400">Captures multi-document context for complex procedures</td>
-                  </tr>
-                  <tr>
-                    <td className="font-semibold text-white">Recall@5</td>
-                    <td className="font-mono text-amber-300">{(evalData.comparison.recall_at_5?.bm25 * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-emerald-400 font-bold">{(evalData.comparison.recall_at_5?.hybrid * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-cyan-300">{(evalData.comparison.recall_at_5?.delta * 100).toFixed(1)}%</td>
-                    <td className="text-xs text-slate-400">Sufficient recall depth for conflict and safety discovery</td>
-                  </tr>
-                  <tr>
-                    <td className="font-semibold text-white">Citation Precision</td>
-                    <td className="font-mono text-emerald-400">{(evalData.comparison.citation_validity_precision?.bm25 * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-emerald-400 font-bold">{(evalData.comparison.citation_validity_precision?.hybrid * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-slate-400">0.0%</td>
-                    <td className="text-xs text-slate-400">Deterministic validator rejects any non-retrieved citations</td>
-                  </tr>
-                  <tr>
-                    <td className="font-semibold text-white">Abstention Behavior</td>
-                    <td className="font-mono text-emerald-400">{(evalData.comparison.abstention_accuracy?.bm25 * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-emerald-400 font-bold">{(evalData.comparison.abstention_accuracy?.hybrid * 100).toFixed(1)}%</td>
-                    <td className="font-mono text-slate-400">0.0%</td>
-                    <td className="text-xs text-slate-400">Strict abstention triggers on out-of-scope or missing evidence</td>
-                  </tr>
-                  <tr>
-                    <td className="font-semibold text-white">High-Risk Safety Compliance</td>
-                    <td className="font-mono text-emerald-400">100.0%</td>
-                    <td className="font-mono text-emerald-400 font-bold">100.0%</td>
-                    <td className="font-mono text-slate-400">0.0%</td>
-                    <td className="text-xs text-slate-400">Deterministic safety rules cannot be bypassed by model scores</td>
-                  </tr>
-                  <tr>
-                    <td className="font-semibold text-white">Mean Latency</td>
-                    <td className="font-mono text-cyan-300">{evalData.comparison.avg_latency_ms?.bm25} ms</td>
-                    <td className="font-mono text-cyan-300">{evalData.comparison.avg_latency_ms?.hybrid} ms</td>
-                    <td className="font-mono text-slate-400">+{evalData.comparison.avg_latency_ms?.delta} ms</td>
-                    <td className="text-xs text-slate-400">Both well within real-time edge shop-floor requirements (&lt; 200 ms)</td>
-                  </tr>
+                  {metricKeys.map((key) => (
+                    <tr key={key}>
+                      <td>{metricLabels[key] || key.replace(/_/g, ' ')}</td>
+                      <td>{formatMetric(key, comparison[key]?.bm25)}</td>
+                      <td>{formatMetric(key, comparison[key]?.hybrid)}</td>
+                      <td>{formatMetric(key, comparison[key]?.delta)}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
-          </div>
-        </div>
-      ) : (
-        <div className="card text-center py-16 space-y-4 border-slate-700">
-          <div className="text-4xl">⚡</div>
-          <h3 className="font-bold text-white text-lg">Benchmark Suite Ready</h3>
-          <p className="text-xs text-slate-400 max-w-lg mx-auto">
-            Click <strong>'Run Live Benchmark'</strong> to run all ground-truth queries through both BM25 and Hybrid retrieval pipelines. Real test metrics will be generated on this machine.
-          </p>
-          <button onClick={handleRunEvaluation} disabled={running} className="btn btn-primary px-6">
-            {running ? 'Executing Suite...' : '⚡ Run Live Benchmark'}
-          </button>
-        </div>
-      )}
+            {metricKeys.length === 0 && <div className="empty-state">The benchmark returned no comparable metrics.</div>}
+          </section>
+        </>
+      ) : !running ? (
+        <section className="panel empty-state benchmark-empty">
+          <p>No benchmark run has been recorded in this view.</p>
+          <p>Run the suite to view measured results for the current database and configured dataset.</p>
+        </section>
+      ) : null}
 
-      {/* Ground Truth Modal */}
       {showDataset && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="card w-full max-w-3xl space-y-4 border-slate-700 max-h-[85vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-white text-base">Ground Truth Benchmark Test Dataset ({datasetCases.length} Cases)</h3>
-              <button onClick={() => setShowDataset(false)} className="text-slate-400 hover:text-white">✕</button>
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel dataset-modal" role="dialog" aria-modal="true" aria-labelledby="dataset-title">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Configured test input</p>
+                <h2 id="dataset-title">Benchmark cases ({datasetCases.length})</h2>
+              </div>
+              <button type="button" className="icon-button" onClick={() => setShowDataset(false)} aria-label="Close benchmark cases">×</button>
             </div>
-
-            <div className="space-y-3">
-              {datasetCases.map((cs) => (
-                <div key={cs.id} className="p-3 bg-slate-900 border border-slate-800 rounded text-xs space-y-1">
-                  <div className="flex justify-between items-center">
-                    <span className="font-mono font-bold text-cyan-400">{cs.id} [{cs.category}]</span>
-                    <span className="badge badge-approved text-[10px]">
-                      {cs.should_abstain ? `Expected Abstain (${cs.expected_abstention_reason})` : 'Expected Answer'}
-                    </span>
+            <div className="dataset-list">
+              {datasetCases.map((testCase, index) => (
+                <article className="dataset-case" key={testCase.id || index}>
+                  <div className="dataset-case-heading">
+                    <strong>{testCase.id || `Case ${index + 1}`}</strong>
+                    <span>{testCase.category || 'Uncategorized'}</span>
                   </div>
-                  <div className="text-white font-medium">"{cs.query}"</div>
-                  <div className="text-slate-400 font-mono text-[11px]">
-                    Expected Docs: {cs.expected_docs?.length > 0 ? cs.expected_docs.join(', ') : 'None (Abstain)'} | Safety Critical: {cs.is_safety_critical ? 'YES' : 'NO'}
+                  <p>{testCase.query || 'No query provided.'}</p>
+                  <div className="dataset-case-meta">
+                    <span>Expected documents: {testCase.expected_docs?.length ? testCase.expected_docs.join(', ') : 'None specified'}</span>
+                    <span>{testCase.should_abstain ? `Expected abstention${testCase.expected_abstention_reason ? `: ${testCase.expected_abstention_reason}` : ''}` : 'Answer expected'}</span>
+                    {testCase.is_safety_critical && <span className="status-pill status-warning">Safety critical</span>}
                   </div>
-                </div>
+                </article>
               ))}
+              {datasetCases.length === 0 && <div className="empty-state">The benchmark dataset contains no cases.</div>}
             </div>
-          </div>
+          </section>
         </div>
       )}
     </div>
